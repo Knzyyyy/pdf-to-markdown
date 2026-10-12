@@ -1,0 +1,31 @@
+/.phpunit.cache
+/node_modules
+/public/build
+/public/hot
+/public/storage
+/storage/*.key
+/vendor
+.env
+.env.backup
+.env.production
+.phpunit.result.cache
+Homestead.json
+Homestead.yaml
+auth.json
+npm-debug.log
+yarn-error.log
+/.fleet
+/.idea
+/.vscode
+
+# ---------------------------------------------------------------------------
+# Berkas PDF milik pengguna
+# ---------------------------------------------------------------------------
+# Fixture PDF untuk test TIDAK disimpan sebagai file: tests/Support/PdfFactory.php
+# membuat PDF sintetis langsung di memori setiap kali test dijalankan. Jadi
+# tidak ada *.pdf yang perlu ikut commit, dan tidak ada pengecualian yang perlu
+# ditulis di sini.
+#
+# Aturan ini mencegah dokumen asli (kontrak, rapport, data pribadi) ikut
+# ter-commit tanpa disadari.
+*.pdf
