@@ -10,10 +10,15 @@ use Tests\TestCase;
  * Test perilaku trusted proxy di level HTTP.
  *
  * Focus: memastikan X-Forwarded-For dari client TIDAK dipercaya saat
- * TRUSTED_PROXIES kosong, dan DIPERCAYA saat diisi "*".
+ * trustedproxy.proxies kosong, dan DIPERCAYA saat diisi "*".
  *
  * Ini yang relevan: kalau salah, rate limit 10/menit jadi tidak berguna
  * karena semua request akan terhitung berasal dari satu IP.
+ *
+ * Test ini memakai config(), BUKAN putenv(). Alasannya dijelaskan di
+ * TrustProxiesTest: env() membaca $_ENV/_SERVER lebih dulu daripada
+ * getenv(), sehingga nilai dari .env selalu menang atas putenv() dan hasil
+ * testnya berbeda antara mesin lokal dan CI.
  */
 class TrustedProxyBehaviourTest extends TestCase
 {
@@ -29,15 +34,15 @@ class TrustedProxyBehaviourTest extends TestCase
 
     protected function tearDown(): void
     {
-        putenv('TRUSTED_PROXIES');
-        unset($_ENV['TRUSTED_PROXIES'], $_SERVER['TRUSTED_PROXIES']);
+        // Kembalikan ke nilai aslinya agar tidak bocor ke test lain.
+        config(['trustedproxy.proxies' => env('TRUSTED_PROXIES')]);
 
         parent::tearDown();
     }
 
     public function test_x_forwarded_for_diabaikan_secara_default(): void
     {
-        putenv('TRUSTED_PROXIES');
+        config(['trustedproxy.proxies' => '']);
 
         $response = $this->get('/__ip-probe', [
             'X-Forwarded-For' => '203.0.113.5',
@@ -50,9 +55,22 @@ class TrustedProxyBehaviourTest extends TestCase
         $this->assertNotSame('203.0.113.5', $response->json('ip'));
     }
 
+    public function test_x_forwarded_for_diabaikan_kalaunya_null(): void
+    {
+        config(['trustedproxy.proxies' => null]);
+
+        $response = $this->get('/__ip-probe', [
+            'X-Forwarded-For' => '203.0.113.5',
+            'REMOTE_ADDR' => '198.51.100.7',
+        ]);
+
+        $response->assertOk();
+        $this->assertNotSame('203.0.113.5', $response->json('ip'));
+    }
+
     public function test_x_forwarded_for_dipercaya_kalauproxy_ditandai(): void
     {
-        putenv('TRUSTED_PROXIES=*');
+        config(['trustedproxy.proxies' => '*']);
 
         $response = $this->get('/__ip-probe', [
             'X-Forwarded-For' => '203.0.113.5',
@@ -61,13 +79,41 @@ class TrustedProxyBehaviourTest extends TestCase
 
         $response->assertOk();
 
-        // Dengan TRUSTED_PROXIES=* (setup Render/Railway), IP asli terbaca.
+        // Dengan nilai "*" (setup Render/Railway), IP asli terbaca.
         $this->assertSame('203.0.113.5', $response->json('ip'));
+    }
+
+    public function test_daftar_ip_proxy_khusus_dipercayai(): void
+    {
+        // Hanya proxy pengirim (198.51.100.7) yang dipercaya.
+        config(['trustedproxy.proxies' => '198.51.100.7']);
+
+        $response = $this->get('/__ip-probe', [
+            'X-Forwarded-For' => '203.0.113.5',
+            'REMOTE_ADDR' => '198.51.100.7',
+        ]);
+
+        $response->assertOk();
+        $this->assertSame('203.0.113.5', $response->json('ip'));
+    }
+
+    public function test_proxy_lain_tidak_dipercayai(): void
+    {
+        // Proxy yang mengirim request bukan 198.51.0.1, jadi tidak dipercaya.
+        config(['trustedproxy.proxies' => '198.51.100.7']);
+
+        $response = $this->get('/__ip-probe', [
+            'X-Forwarded-For' => '203.0.113.5',
+            'REMOTE_ADDR' => '10.0.0.9',
+        ]);
+
+        $response->assertOk();
+        $this->assertNotSame('203.0.113.5', $response->json('ip'));
     }
 
     public function test_tanpa_x_forwarded_for_tidak_berubah(): void
     {
-        putenv('TRUSTED_PROXIES');
+        config(['trustedproxy.proxies' => '']);
 
         $response = $this->get('/__ip-probe', ['REMOTE_ADDR' => '198.51.100.7']);
 
@@ -125,6 +171,12 @@ class TrustedProxyBehaviourTest extends TestCase
             $this->artisan('config:cache')->assertSuccessful();
 
             $this->assertFileExists($cacheFile);
+
+            // Nilai config hasil cache harus tetap ada, termasuk proxies.
+            $cached = require $cacheFile;
+
+            $this->assertArrayHasKey('trustedproxy', $cached);
+            $this->assertArrayHasKey('proxies', $cached['trustedproxy']);
         } finally {
             $this->artisan('config:clear')->run();
         }
@@ -141,6 +193,35 @@ class TrustedProxyBehaviourTest extends TestCase
         $this->assertDirectoryIsWritable(
             \storage_path('framework/cache/data'),
             'Folder cache file harus bisa ditulis oleh www-data'
+        );
+    }
+
+    /**
+     * Penjaga: test suite TIDAK boleh dijalankan saat config masih ter-cache.
+     *
+     * Ini bukan masalah yang berasal dari kode ini, tapi mudah terjadi.
+     * Saat config ter-cache, nilai override dari phpunit.xml (CACHE_STORE=array,
+     * SESSION_DRIVER=array) diabaikan, sehingga test berjalan memakai cache dan
+     * session file sungguhan. Gejalanya: puluhan test gagal dengan 419
+     * (CSRF) dan "null is of type array", yang sama sekali tidak obviously
+     * berkaitan dengan cache.
+     *
+     * Pesannya ditulis eksplisit supaya tidak spends waktu mencari
+     * penyebab yang salah.
+     */
+    public function test_config_tidak_boleh_ter_cache_saat_menjalankan_test(): void
+    {
+        if (! app()->configurationIsCached()) {
+            $this->assertTrue(true, 'Config tidak ter-cache, test environment benar.');
+
+            return;
+        }
+
+        $this->fail(
+            'Config sedang ter-cache, sehingga override dari phpunit.xml '
+            .'(CACHE_STORE=array, SESSION_DRIVER=array) diabaikan dan mayoritas '
+            .'test akan gagal dengan error yang menyesatkan (419, null is of type array). '
+            .'Jalankan dulu: php artisan config:clear && php artisan route:clear'
         );
     }
 
@@ -183,7 +264,7 @@ class TrustedProxyBehaviourTest extends TestCase
      *
      * Nilai ini tidak bisa ditulis di php.ini karena php.ini tidak bisa membaca
      * environment variable, jadi entrypoint yang menulisnya. Test ini
-     * menjaga supaya mechanism itu tidak hilang diam-diam.
+     * menjaga supaya mekanisme itu tidak hilang diam-diam.
      */
     public function test_session_secure_cookie_diatur_lewat_environment(): void
     {
