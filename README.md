@@ -243,6 +243,138 @@ vendor/bin/pint           # perbaiki otomatis
 Fixture PDF dibuat on-the-fly oleh `tests/Support/PdfFactory.php`, tidak ada
 file biner di dalam repository dan tidak ada data pribadi di dalamnya.
 
+## Deploy dengan Docker
+
+> **Status: belum pernah di-deploy.** Image di bawah disusun mengikuti
+> dokumentasi resmi `php:8.3-apache` dan `composer:2`, tetapi **belum pernah
+> di-build maupun dijalankan** karena Docker tidak tersedia di mesin tempat
+> proyek ini dibuat. Perlakukan bagian ini sebagai panduan, bukan sebagai
+> jaminan. Uji dulu dengan `docker build` di mesin Anda sendiri.
+
+### Isi image
+
+Satu container, satu instance, tanpa database eksternal.
+
+```
+Stage 1  node:20-alpine     npm ci + npm run build  -> public/build
+Stage 2  composer:2         composer install (--no-dev --no-scripts)
+Stage 3  php:8.3-apache     runtime: Apache + ext-zip + opcache
+```
+
+Berkas pendukung:
+
+| Berkas | Fungsi |
+|---|---|
+| `Dockerfile` | tiga tahap build di atas |
+| `.dockerignore` | mencegah `.env`, `vendor`, `node_modules`, `tests` ikut ke image |
+| `docker/entrypoint.sh` | set port & DocumentRoot, cache config/route, start Apache |
+| `docker/php-production.ini` | batas upload, memory, opcache, produksi |
+| `docker/apache-app.conf` | log Apache ke stdout/stderr supaya terbaca di dashboard Platform |
+
+### Yang perlu diketahui
+
+- **Extension PHP.** Yang sudah bawaan `php:8.3-apache` dan tidak dipasang
+  ulang: `ctype`, `dom`, `fileinfo`, `iconv`, `libxml`, `mbstring`, `openssl`,
+  `SimpleXML`, `xml`, `xmlreader`, `xmlwriter`, `zlib`. Yang dipasang manual:
+  **`zip`** (dipakai fitur unduh ZIP dan tercatat di `composer.json`) dan
+  **`opcache`**.
+- **Cache dibuat saat start, bukan saat build.** `config:cache` dan
+  `route:cache` memblokir environment variable. Kalau dibuat saat build,
+  aplikasi akan memakai nilai build yang kosong dan mengabaikan `APP_KEY` /
+  `APP_URL` milik Platform. Karena itu keduanya dijalankan di `entrypoint.sh`.
+- **Container gagal start bila `APP_KEY` belum diisi.** Ini disengaja:
+  lebih baik gagal start daripada berjalan dengan enkripsi cookie yang salah.
+- **`opcache.validate_timestamps = 0`.** Kode di dalam image tidak berubah
+  saat container berjalan. Setelah mengubah kode, build ulang image.
+- **Efek samping `session.cookie_secure = 1`.** Aplikasi hanya bisa diakses
+  lewat HTTPS. Kalau backend memakai HTTP biasa, cookie session tidak akan
+  terkirim dan halaman akan terlihat seperti selalu gagal login.
+
+### Build dan jalankan secara lokal
+
+```bash
+# 1. Build image
+docker build -t pdf-to-markdown .
+
+# 2. Siapkan APP_KEY
+php artisan key:generate --show
+# salin hasilnya, misal: base64:xY3...=
+
+# 3. Jalankan
+docker run --rm -p 8080:8080 \
+  -e APP_ENV=production \
+  -e APP_DEBUG=false \
+  -e APP_KEY=base64:xY3...= \
+  -e APP_URL=http://localhost:8080 \
+  -e TRUSTED_PROXIES= \
+  pdf-to-markdown
+```
+
+Buka `http://localhost:8080/pdf-to-markdown`.
+
+Port di dalam container mengikuti variabel `PORT` (default `8080`), jadi
+`docker run -p 3000:8080` tetap bekerja tanpa rebuild.
+
+Cek log dan kesehatan container:
+
+```bash
+docker run -d --name pdfmd -p 8080:8080 -e APP_KEY=base64:xY3...= pdf-to-markdown
+docker logs -f pdfmd
+docker ps                 # kolom STATUS menunjukkan (healthy)
+```
+
+### Deploy ke Render
+
+1. Push repo ini ke GitHub.
+2. Di Render: **New > Web Service**, lalu hubungkan repository.
+3. Isi **Runtime: Docker**. Render membaca `Dockerfile` dari root repository.
+   Kolom Build Command dan Start Command **dikosongkan** — keduanya
+   ditangani `Dockerfile` dan `entrypoint.sh`.
+4. **Instance Type: Starter** atau yang lebih besar. Instance gratis
+   Ephemeral akan keluar dari sleep dan.build ulang berkali-kali; untuk satu
+   aplikasi sederhana ini, instance gratis biasanya masih cukup, tapi
+   expect build ulang saat idle.
+5. Environment variables (wajib):
+
+   | Key | Nilai |
+   |---|---|
+   | `APP_ENV` | `production` |
+   | `APP_DEBUG` | `false` |
+   | `APP_KEY` | `base64:...` (dari `php artisan key:generate --show`) |
+   | `APP_URL` | `https://nama-aplikasi.onrender.com` |
+   | `TRUSTED_PROXIES` | `*` |
+   | `CACHE_STORE` | `file` |
+   | `SESSION_DRIVER` | `file` |
+
+   `TRUSTED_PROXIES=*` wajib diisi karena Render hanya menjangkau aplikasi
+   lewat proxy platform. Tanpa itu, semua request terlihat berasal dari satu
+   IP internal dan rate limit 10 konversi per menit akan habis sebelum
+   pengguna lain mencoba. Detail alasannya ada di bagian
+   [Catatan untuk deployment](#catatan-untuk-deployment).
+
+6. Deploy. Build log akan menampilkanoutput dari tiga tahap di atas. Kalau
+   gagal, hampir selalu penyebabnya ada di tahap `vendor` (dependency) atau
+   saat `composer install` complains soal `ext-zip`.
+
+### Deploy ke Railway
+
+Sama seperti Render: **New Project > Deploy from GitHub repo**, pilih
+service **Web Service**, lalu isi environment variables yang sama persis di
+tab **Variables**. Railway menyediakan `PORT` secara otomatis, dan
+`entrypoint.sh` sudah membacanya.
+
+### Setelah deploy
+
+- Log aplikasi muncul di dashboard Platform (`stdout`/`stderr`), karena
+  `apache-app.conf` mengarahkan log Apache ke sana.
+- Filesystem container bersifat ephemeral. Ini aman untuk aplikasi ini:
+  file PDF tidak pernah disimpan, dan hasil konversi hanya hidup di cache
+  selama 15 menit. Saat instance restart, cache ikut hilang dan pengguna
+  hanya perlu konversi ulang.
+- Kalau nanti butuh lebih dari satu instance, hasil konversi **harus**
+  dipindah ke Redis atau cache bersama, karena cache `file` tidak terbaca
+  antar instance.
+
 ## Struktur folder
 
 ```
@@ -272,6 +404,14 @@ resources/
 
 routes/web.php                         # 4 route aplikasi
 tests/                                 # lihat tabel di atas
+
+# Deployment
+Dockerfile                             # build tiga tahap
+.dockerignore                          # apa yang tidak ikut ke image
+docker/
+├── entrypoint.sh                      # set port, cache, start Apache
+├── php-production.ini                 # php.ini produksi
+└── apache-app.conf                    # log Apache ke stdout/stderr
 ```
 
 ## Alur kerja
