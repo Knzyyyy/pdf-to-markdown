@@ -246,17 +246,163 @@ class TrustedProxyBehaviourTest extends TestCase
 
         $dockerfile = (string) file_get_contents($root.'/Dockerfile');
 
-        // Base image harus versi major PHP yang cocok dengan composer.json.
-        $this->assertStringContainsString('FROM php:8.3-apache', $dockerfile);
-        $this->assertStringContainsString('FROM node:20-alpine', $dockerfile);
-        $this->assertStringContainsString('FROM composer:2', $dockerfile);
-
         // ext-zip wajib ada karena tercatat di composer.json.
         $this->assertStringContainsString('zip', $dockerfile);
 
         // .env tidak boleh ikut ke dalam image.
         $dockerignore = (string) file_get_contents($root.'/.dockerignore');
         $this->assertMatchesRegularExpression('/^\.env$/m', $dockerignore);
+    }
+
+    /**
+     * Tahap "vendor" harus memakai PHP yang sama dengan tahap final.
+     *
+     * Latitude ini pernah jadi sumber kegagalan: tahap vendor memakai image
+     * composer:2 yang PHP-nya ikut naik ke 8.5, sementara paket di lock file
+     * (nette/schema v1.3.2) hanya mendukung "8.1 - 8.4". Akibatnya
+     * composer install menolak lock tersebut.
+     */
+    public function test_tahap_vendor_memakai_php_yang_sama_dengan_tahap_final(): void
+    {
+        $dockerfile = (string) file_get_contents(\base_path('Dockerfile'));
+
+        $this->assertMatchesRegularExpression(
+            '/^FROM php:8\.3-cli AS vendor$/m',
+            $dockerfile,
+            'Tahap vendor harus memakai php:8.3-cli'
+        );
+
+        $this->assertMatchesRegularExpression(
+            '/^FROM php:8\.3-apache$/m',
+            $dockerfile,
+            'Tahap final harus memakai php:8.3-apache'
+        );
+
+        // Binary Composer tetap diambil dari image composer:2.
+        $this->assertStringContainsString(
+            'COPY --from=composer:2 /usr/bin/composer /usr/bin/composer',
+            $dockerfile,
+            'Binary composer harus disalin dari image composer:2'
+        );
+
+        // composer:2 tidak boleh lagi dipakai sebagai basis tahap.
+        $this->assertDoesNotMatchRegularExpression(
+            '/^FROM composer:/m',
+            $dockerfile,
+            'composer:2 hanya boleh dipakai lewat COPY --from, bukan sebagai FROM'
+        );
+    }
+
+    /**
+     * ext-zip harus dipasang di tahap vendor juga, bukan hanya di tahap final.
+     *
+     * composer.json menyatakan "ext-zip": "*", jadi tanpa extension ini
+     * composer install berhenti dengan:
+     *   "requires ext-zip * -> the requested PHP extension zip is missing"
+     */
+    public function test_tahap_vendor_memasang_ext_zip(): void
+    {
+        $dockerfile = (string) file_get_contents(\base_path('Dockerfile'));
+
+        // Ambil isi tahap vendor saja.
+        $this->assertSame(1, preg_match('/FROM php:8\.3-cli AS vendor\n(.*?)(?=\n# ={10,}|\Z)/s', $dockerfile, $matches));
+
+        $vendorStage = $matches[1] ?? '';
+
+        $this->assertStringContainsString('libzip-dev', $vendorStage);
+        $this->assertStringContainsString('docker-php-ext-install', $vendorStage);
+        $this->assertStringContainsString('zip', $vendorStage);
+    }
+
+    /**
+     * Dilarang memakai --ignore-platform-req di tahap vendor.
+     *
+     * Flag itu mematikan pemeriksaan kecocokan PHP, sehingga lock file yang
+     * tidak kompatibel bisa lolos ke image lalu gagal saat runtime dengan
+     * pesan yang jauh lebih sulit dibaca.
+     */
+    public function test_dilarang_memakai_ignore_platform_req(): void
+    {
+        $dockerfile = (string) file_get_contents(\base_path('Dockerfile'));
+
+        // Buang komentar dulu, supaya peringatan di dalam komentar tidak
+        // ikut terperiksa.
+        $commands = preg_replace('/#.*$/m', '', $dockerfile) ?? $dockerfile;
+
+        $this->assertDoesNotMatchRegularExpression(
+            '/--ignore-platform-reqs?(?![\w-])/',
+            $commands,
+            'Dockerfile tidak boleh memakai --ignore-platform-req'
+        );
+
+        // Perintah composer install harus tetap lengkap.
+        $this->assertStringContainsString(
+            '--no-dev',
+            $dockerfile,
+        );
+        $this->assertStringContainsString('--optimize-autoloader', $dockerfile);
+        $this->assertStringContainsString('--no-interaction', $dockerfile);
+        $this->assertStringContainsString('--no-scripts', $dockerfile);
+    }
+
+    /**
+     * Semua base image harus ter-pin.
+     *
+     * Tag "latest" atau major yang mengambang (mis. "php:latest") bisa
+     * berubah tanpa jejak, dan_BUILD ini akan gagal atau berubah hasil
+     * tanpa ada yang mengubah berkas di repository.
+     */
+    public function test_semua_base_image_ter_pin(): void
+    {
+        $dockerfile = (string) file_get_contents(\base_path('Dockerfile'));
+
+        preg_match_all('/^FROM\s+(\S+)/m', $dockerfile, $matches);
+
+        $images = $matches[1] ?? [];
+
+        $this->assertCount(3, $images, 'Harus ada tepat 3 tahap build');
+
+        foreach ($images as $image) {
+            // Tidak boleh memakai tag "latest".
+            $this->assertDoesNotMatchRegularExpression(
+                '/:latest$/',
+                $image,
+                "Base image memakai tag latest: {$image}"
+            );
+
+            // Setiap tag harus menyebut versi secara eksplisit.
+            // "php:8.3-cli" dan "node:20-alpine" lolos,
+            // "php" atau "php:8.3-fpm-bookworm-latest" tidak.
+            $this->assertMatchesRegularExpression(
+                '/^[a-z0-9.\-]+:[a-z0-9.\-]+/',
+                $image,
+                "Base image tidak menyebut versi secara eksplisit: {$image}"
+            );
+
+            // Image PHP harus di 8.3, sama dengan composer.json.
+            if (str_starts_with($image, 'php:')) {
+                $this->assertStringStartsWith(
+                    'php:8.3',
+                    $image,
+                    "Base image PHP harus ter-pin ke 8.3: {$image}"
+                );
+            }
+        }
+
+        // Node tetap di major 20.
+        $this->assertContains('node:20-alpine', $images);
+
+        // Tidak boleh ada FROM yang memakai major mengambang tanpa minor,
+        // misalnya "php:8-apache".
+        foreach ($images as $image) {
+            if (str_starts_with($image, 'php:')) {
+                $this->assertDoesNotMatchRegularExpression(
+                    '/^php:8-(?!3\b)/',
+                    $image,
+                    "Base image PHP harus menyebut minor, bukan hanya major: {$image}"
+                );
+            }
+        }
     }
 
     /**

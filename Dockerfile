@@ -38,18 +38,50 @@ RUN npm run build
 # =============================================================================
 # Tahap 2 — Dependency PHP
 # =============================================================================
-FROM composer:2 AS vendor
+# Basis WAJIB disamakan dengan tahap 3 (php:8.3-*).
+#
+# Sebelumnya tahap ini memakai image composer:2, dan image itu memakai PHP
+# newest yang tersedia. Saat PHP 8.5 rilis, CI gagal di tahap ini: paket
+# nette/schema v1.3.2 di lock file hanya mendukung "8.1 - 8.4", sehingga
+# composer install menolak lock tersebut.
+#
+# Verifikasi ulang dengan perintah Composer:
+#   composer check-platform-reqs --lock   -> harus sukses di PHP 8.3
+#   composer prohibits php 8.5 --locked   -> harus TIDAK menampilkan
+#                                             nette/schema
+#
+# Binary Composer tetap diambil dari image composer:2 lewat COPY, jadi kita
+# mendapat Composer versi terbaru tanpa mengikuti PHP-nya.
+FROM php:8.3-cli AS vendor
 
 WORKDIR /app
+
+# Binary Composer disalin dari image composer:2. Binary itu berupa PHAR,
+# jadi portabel dan bisa dijalankan di PHP Debian apa pun.
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
+# ext-zip wajib dipasang karena composer.json menyatakan "ext-zip": "*".
+# Tanpa ini, composer install berhenti dengan "requires ext-zip * -> it is
+# missing from your system". unzip dipakai sebagai cadangan Composer saat
+# mengambil paket dist, git untuk skenario lain.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends libzip-dev unzip git; \
+    docker-php-ext-install -j"$(nproc)" zip; \
+    rm -rf /var/lib/apt/lists/*
 
 COPY composer.json composer.lock ./
 
 # --no-scripts : package discovery ditunda ke tahap start, bukan build.
 #                Alasannya APP_KEY dsb. baru tersedia saat container berjalan.
 #
-# Catatan ext-zip: image composer:2 sudah membawa extension zip, jadi
-# syarat "ext-zip": "*" di composer.json tidak perlu diabaikan dengan
-# --ignore-platform-req.
+# PENTING: jangan pernah memakai --ignore-platform-req / --ignore-platform-reqs
+# di sini. Flag itu membuat Composer berhenti memeriksa kecocokan versi PHP,
+# dan akibatnya lock file yang tidak kompatibel bisa lolos ke image lalu
+# gagal saat runtime dengan error yang jauh lebih sulit dibaca.
+#
+# Kalau someday composer install gagal karena platform, perbaikilah lock-nya
+# dengan composer update --lock, bukan dengan mengabaikan pemeriksaan.
 RUN composer install \
         --no-dev \
         --optimize-autoloader \
