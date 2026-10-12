@@ -177,4 +177,83 @@ class TrustedProxyBehaviourTest extends TestCase
         $dockerignore = (string) file_get_contents($root.'/.dockerignore');
         $this->assertMatchesRegularExpression('/^\.env$/m', $dockerignore);
     }
+
+    /**
+     * session.cookie_secure harus bisa diatur lewat environment variable.
+     *
+     * Nilai ini tidak bisa ditulis di php.ini karena php.ini tidak bisa membaca
+     * environment variable, jadi entrypoint yang menulisnya. Test ini
+     * menjaga supaya mechanism itu tidak hilang diam-diam.
+     */
+    public function test_session_secure_cookie_diatur_lewat_environment(): void
+    {
+        $root = \base_path();
+
+        $ini = (string) file_get_contents($root.'/docker/php-production.ini');
+        $entrypoint = (string) file_get_contents($root.'/docker/entrypoint.sh');
+
+        // Di php.ini harus TIDAK ada nilai yang dipaksa.
+        $this->assertDoesNotMatchRegularExpression(
+            '/^\s*session\.cookie_secure\s*=/m',
+            preg_replace('/^\s*;.*$/m', '', $ini) ?? $ini,
+            'session.cookie_secure tidak boleh dikunci di php.ini karena perlu mengikuti env'
+        );
+
+        // Entrypoint harus membacanya dari environment.
+        $this->assertStringContainsString('SESSION_SECURE_COOKIE', $entrypoint);
+        $this->assertMatchesRegularExpression(
+            '/SESSION_SECURE_COOKIE="\$\{SESSION_SECURE_COOKIE:-1\}"/',
+            $entrypoint,
+            'Default SESSION_SECURE_COOKIE harus 1 (hanya HTTPS)'
+        );
+
+        // Hanya 0 dan 1 yang diterima, selain itu fallback ke 1.
+        $this->assertMatchesRegularExpression(
+            '/case\s+"\$SESSION_SECURE_COOKIE" in\s*\n\s*0\|1\)/',
+            $entrypoint,
+            'Nilai SESSION_SECURE_COOKIE harus divalidasi ketat'
+        );
+
+        // Hasilnya ditulis ke file .ini supaya PHP membacanya.
+        $this->assertStringContainsString('session.cookie_secure', $entrypoint);
+        $this->assertStringContainsString('conf.d', $entrypoint);
+    }
+
+    public function test_env_produksi_terdokumentasi_di_env_example(): void
+    {
+        $envExample = (string) file_get_contents(\base_path('.env.example'));
+
+        foreach ([
+            'TRUSTED_PROXIES',
+            'SESSION_SECURE_COOKIE',
+            'APP_ENV',
+            'APP_DEBUG',
+            'APP_KEY',
+            'APP_URL',
+            'CACHE_STORE',
+            'SESSION_DRIVER',
+        ] as $key) {
+            $this->assertStringContainsString(
+                $key.'=',
+                $envExample,
+                "Variabel wajib untuk produksi belum ada di .env.example: {$key}"
+            );
+        }
+    }
+
+    /**
+     * Job CI harus benar-benar membangun dan menjalankan image.
+     */
+    public function test_ci_memiliki_job_docker(): void
+    {
+        $workflow = (string) file_get_contents(\base_path('.github/workflows/tests.yml'));
+
+        $this->assertMatchesRegularExpression('/^  docker:$/m', $workflow);
+        $this->assertStringContainsString('needs: tests', $workflow);
+        $this->assertStringContainsString('docker build -t pdf-to-markdown .', $workflow);
+        $this->assertStringContainsString('http://localhost:8080/pdf-to-markdown', $workflow);
+
+        // Tanpa --retry-connrefused, curl berhenti saat container belum siap.
+        $this->assertStringContainsString('--retry-connrefused', $workflow);
+    }
 }

@@ -286,9 +286,13 @@ Berkas pendukung:
   lebih baik gagal start daripada berjalan dengan enkripsi cookie yang salah.
 - **`opcache.validate_timestamps = 0`.** Kode di dalam image tidak berubah
   saat container berjalan. Setelah mengubah kode, build ulang image.
-- **Efek samping `session.cookie_secure = 1`.** Aplikasi hanya bisa diakses
-  lewat HTTPS. Kalau backend memakai HTTP biasa, cookie session tidak akan
-  terkirim dan halaman akan terlihat seperti selalu gagal login.
+- **`SESSION_SECURE_COOKIE` mengatur `session.cookie_secure`.** Nilai `1`
+  (default) berarti cookie hanya dikirim lewat HTTPS — benar untuk
+  Render/Railway. Nilai `0` diperlukan saat menguji lewat `http://localhost`,
+  karena kalau tidak cookie session tidak akan pernah terkirim dan halaman akan
+  terlihat seperti selalu gagal login. Nilainya hanya dibaca di dalam
+  container, dituliskan ke `php.ini` oleh `entrypoint.sh` saat start.
+  Nilai selain `0`/`1` diabaikan dan diganti `1`.
 
 ### Build dan jalankan secara lokal
 
@@ -307,13 +311,48 @@ docker run --rm -p 8080:8080 \
   -e APP_KEY=base64:xY3...= \
   -e APP_URL=http://localhost:8080 \
   -e TRUSTED_PROXIES= \
+  -e SESSION_SECURE_COOKIE=0 \
   pdf-to-markdown
 ```
+
+`SESSION_SECURE_COOKIE=0` dipakai karena percobaan ini lewat `http://localhost`,
+bukan HTTPS.
 
 Buka `http://localhost:8080/pdf-to-markdown`.
 
 Port di dalam container mengikuti variabel `PORT` (default `8080`), jadi
 `docker run -p 3000:8080` tetap bekerja tanpa rebuild.
+
+### Smoke test lewat command line
+
+Command yang sama dengan yang dipakai job `docker` di GitHub Actions. Berguna
+untuk memastikan image benar-benar bisa dijalankan sebelum di-deploy:
+
+```bash
+docker build -t pdf-to-markdown .
+
+APP_KEY="base64:$(head -c 32 /dev/urandom | base64)"
+
+docker run -d --name pdf-md-smoke \
+  -p 8080:8080 \
+  -e APP_KEY="$APP_KEY" \
+  -e PORT=8080 \
+  -e SESSION_SECURE_COOKIE=0 \
+  pdf-to-markdown
+
+# Tunggu sampai Apache siap. --retry-connrefused wajib ada, tanpa itu curl
+# berhenti saat container masih starting dengan pesan "connection refused".
+curl --fail --retry 10 --retry-delay 3 --retry-connrefused \
+  http://localhost:8080/pdf-to-markdown --output /tmp/page.html
+
+# Kalau gagal, log container tempat penyebabnya ada:
+docker logs pdf-md-smoke
+
+docker rm -f pdf-md-smoke
+```
+
+Dalam Git Bash di Windows, `head -c 32 /dev/urandom` tidak tersedia. Pakai
+`php artisan key:generate --show` sebagai gantinya.
 
 Cek log dan kesehatan container:
 
@@ -343,6 +382,7 @@ docker ps                 # kolom STATUS menunjukkan (healthy)
    | `APP_KEY` | `base64:...` (dari `php artisan key:generate --show`) |
    | `APP_URL` | `https://nama-aplikasi.onrender.com` |
    | `TRUSTED_PROXIES` | `*` |
+   | `SESSION_SECURE_COOKIE` | `1` |
    | `CACHE_STORE` | `file` |
    | `SESSION_DRIVER` | `file` |
 

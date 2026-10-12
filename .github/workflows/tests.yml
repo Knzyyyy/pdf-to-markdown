@@ -18,6 +18,7 @@ jobs:
   tests:
     name: PHP ${{ matrix.php }} / Composer ${{ matrix.composer }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     strategy:
       # Gagal kalau salah satu kombinasi gagal.
@@ -87,3 +88,75 @@ jobs:
             exit 1
           fi
           echo "Aman: .env tidak ter-commit."
+
+  # ---------------------------------------------------------------------------
+  # Smoke test image Docker: build, jalankan, lalu pastikan halamannya terbuka.
+  #
+  # Job ini menangkap masalah yang TIDAK bisa ditangkap test PHP biasa, misalnya
+  # extension yang lupa dipasang, DocumentRoot yang salah, atau container yang
+  # tidak mau start karena APP_KEY kosong.
+  #
+  # Berjalan setelah job tests hijau, karena membangun image lebih mahal.
+  # ---------------------------------------------------------------------------
+  docker:
+    name: Docker build dan smoke test
+    needs: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Tampilkan versi Docker
+        run: docker version
+
+      - name: Build image
+        run: docker build -t pdf-to-markdown .
+
+      # APP_KEY harus berbentuk base64: + 32 byte acak. Container akan gagal
+      # start kalau kosong, dan itu memang perilaku yang diinginkan.
+      - name: Siapkan APP_KEY
+        run: echo "APP_KEY=base64:$(head -c 32 /dev/urandom | base64)" >> "$GITHUB_ENV"
+
+      - name: Jalankan container
+        run: |
+          docker run -d \
+            --name pdf-md-smoke \
+            -p 8080:8080 \
+            -e APP_KEY="${APP_KEY}" \
+            -e PORT=8080 \
+            -e SESSION_SECURE_COOKIE=0 \
+            pdf-to-markdown
+
+      # --retry-connrefused WAJIB ada: tanpa itu curl tidak mengulang saat
+      # container masih starting dan balasannya "connection refused".
+      # --fail membuat HTTP 4xx/5xx dianggap gagal, bukan sukses diam-diam.
+      - name: Pastikan halaman converter terbuka
+        run: |
+          curl --fail --retry 10 --retry-delay 3 --retry-connrefused \
+            http://localhost:8080/pdf-to-markdown \
+            --output /tmp/page.html
+
+          # HTTP 200 saja belum cukup: cek isi halamannya bener-bener
+          # render form converter.
+          grep -q "Unggah dokumen" /tmp/page.html || {
+            echo "::error::Halaman terbuka tapi tidak memuat form converter."
+            exit 1;
+          }
+          grep -q "action=\"/pdf-to-markdown\"" /tmp/page.html || {
+            echo "::error::Form upload tidak ada di halaman."
+            exit 1;
+          }
+
+          echo "OK: halaman converter merespons 200 dan berisi form upload."
+
+      # Kalau langkah di atas gagal, log container sangat dibutuhkan untuk
+      # melihat pesan error dari entrypoint (mis. "requires ext-zip").
+      - name: Tampilkan log container
+        if: always()
+        run: docker logs pdf-md-smoke || true
+
+      - name: Bersihkan container
+        if: always()
+        run: docker rm -f pdf-md-smoke || true
