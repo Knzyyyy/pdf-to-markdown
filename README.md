@@ -28,7 +28,7 @@ Dibangun dengan Laravel, Blade, dan satu library PHP ([`smalot/pdfparser`](https
 | Bagian | Teknologi |
 |---|---|
 | Framework | Laravel 10 (`laravel/framework ^10.10`) |
-| Bahasa | PHP `^8.1` (diuji sampai PHP 8.3) |
+| Bahasa | PHP `^8.2` (diuji sampai PHP 8.3) |
 | Template | Blade |
 | Ekstraksi PDF | `smalot/pdfparser ^2.12` |
 | Frontend | Vite 5, CSS, JavaScript vanilla |
@@ -48,7 +48,7 @@ Database **tidak digunakan**. Tidak ada model, migration, atau query.
 
 | Kebutuhan | Versi | Keterangan |
 |---|---|---|
-| PHP | **8.1+** | Diuji sampai PHP 8.3 (ZTS) |
+| PHP | **8.2+** | Diuji sampai PHP 8.3 (ZTS). Minimal 8.2 karena `composer.lock` memuat beberapa package yang butuh >= 8.2 |
 | Extension PHP | `zlib`, `iconv`, `ctype`, `dom`, `mbstring`, `fileinfo` | Wajib — sudah dipakai library parser |
 | Extension PHP | **`zip`** | **Wajib.** Tercatat di `require` composer.json sebagai `ext-zip`. Dipakai fitur unduh ZIP |
 | Composer | 2.x | |

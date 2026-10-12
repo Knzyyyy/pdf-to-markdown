@@ -23,11 +23,13 @@ jobs:
       # Gagal kalau salah satu kombinasi gagal.
       fail-fast: false
       matrix:
-        php: ['8.1', '8.2', '8.3']
+        # Minimum proyek adalah PHP 8.2 (lihat "php" di composer.json).
+        # PHP 8.1 TIDAK lagi diuji karena composer.lock memuat beberapa
+        # package yang butuh >= 8.2, seperti symfony/string, symfony/yaml,
+        # symfony/css-selector, symfony/event-dispatcher 7.3, dan
+        # laravel/pint 1.25.
+        php: ['8.2', '8.3']
         composer: ['prefer-dist']
-        include:
-          - php: '8.3'
-            coverage: xdebug
 
     steps:
       - name: Checkout repository
