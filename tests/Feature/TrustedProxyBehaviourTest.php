@@ -574,6 +574,52 @@ class TrustedProxyBehaviourTest extends TestCase
     }
 
     /**
+     * ENTRYPOINT bawaan image tidak boleh ditimpa.
+     *
+     * Image resmi php:8.3-apache memasang ENTRYPOINT ["docker-php-entrypoint"]
+     * yang tugasnya menormalkan argumen lalu `exec "$@"`. Kalau Dockerfile
+     * menimpanya, dua perintah umum ikut mati:
+     *   docker run <image> php artisan --version
+     *   docker run <image> bash
+     *
+     * Karena itu script aplikasi dipasang sebagai CMD, bukan ENTRYPOINT.
+     */
+    public function test_entrypoint_bawaan_tidak_ditimpa(): void
+    {
+        $dockerfile = (string) file_get_contents(\base_path('Dockerfile'));
+
+        // Buang komentar sebelum memeriksa, supaya penjelasan di dalam
+        // komentar tidak ikut terperiksa.
+        $instructions = preg_replace('/^\s*#.*$/m', '', $dockerfile) ?? $dockerfile;
+
+        $this->assertDoesNotMatchRegularExpression(
+            '/^ENTRYPOINT\s/mi',
+            $instructions,
+            'Dockerfile tidak boleh memasang ENTRYPOINT, akan menimpa bawaan image'
+        );
+
+        $this->assertStringContainsString(
+            'CMD ["/usr/local/bin/entrypoint.sh"]',
+            $dockerfile,
+            'Script aplikasi harus dipasang sebagai CMD'
+        );
+
+        // Script harus ada di path yang sama dengan yang dipanggil CMD.
+        $this->assertStringContainsString(
+            'COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh',
+            $dockerfile
+        );
+        $this->assertStringContainsString(
+            'RUN chmod +x /usr/local/bin/entrypoint.sh',
+            $dockerfile,
+            'Script harus dibuat executable'
+        );
+
+        // Nama lama tidak boleh tersisa.
+        $this->assertStringNotContainsString('app-entrypoint', $dockerfile);
+    }
+
+    /**
      * Job CI harus benar-benar membangun dan menjalankan image.
      */
     public function test_ci_memiliki_job_docker(): void

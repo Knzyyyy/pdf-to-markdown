@@ -2,7 +2,12 @@
 # =============================================================================
 #  Startup script untuk PDF to Markdown Converter.
 #
-#  Dipanggil otomatis oleh ENTRYPOINT di Dockerfile.
+#  Dipanggil otomatis sebagai perintah default (CMD) di Dockerfile.
+#
+#  ENTRYPOINT bawaan image (docker-php-entrypoint) sengaja tidak ditimpa,
+#  sehingga perintah lain tetap bisa jalan:
+#      docker run <image> php artisan --version
+#      docker run <image> bash
 #
 #  Yang dilakukan di sini (dan BUKAN saat build):
 #   1. Menyesuaikan port Apache dengan variabel PORT dari Platform

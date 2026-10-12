@@ -455,7 +455,7 @@ tests/                                 # lihat tabel di atas
 Dockerfile                             # build tiga tahap
 .dockerignore                          # apa yang tidak ikut ke image
 docker/
-├── entrypoint.sh                      # set port, cache, start Apache
+`-- entrypoint.sh                      # set port, cache, start Apache
 ├── php-production.ini                 # php.ini produksi
 └── apache-app.conf                    # log Apache ke stdout/stderr
 ```

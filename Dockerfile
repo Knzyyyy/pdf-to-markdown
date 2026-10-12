@@ -162,8 +162,19 @@ RUN mkdir -p storage/framework/cache/data \
 # File yang ditulis aplikasi harus milik www-data.
 RUN chown -R www-data:www-data storage bootstrap/cache
 
-COPY docker/entrypoint.sh /usr/local/bin/app-entrypoint
-RUN chmod +x /usr/local/bin/app-entrypoint
+# Entrypoint aplikasi dipasang sebagai CMD, BUKAN sebagai ENTRYPOINT.
+#
+# Image resmi php:8.3-apache sudah punya ENTRYPOINT ["docker-php-entrypoint"],
+# yang tugasnya menormalkan argumen lalu `exec "$@"`. Kalau kita menimpanya,
+# perintah berguna ikut hilang:
+#   docker run <image> php artisan --version   -> tidak lagi jalan
+#   docker run <image> bash                   -> tidak lagi dapat shell
+#
+# Dengan dipasang sebagai CMD, docker-php-entrypoint tetap menjadi pemanggil
+# pertama dan meneruskan ke script kita. Perintah di atas tetap bekerja,
+# sementara tanpa argumen, CMD ini yang dijalankan.
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
 EXPOSE 8080
 
@@ -171,4 +182,8 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD php -r "exit(@fsockopen('127.0.0.1', (int) (getenv('PORT') ?: 8080)) ? 0 : 1);"
 
-ENTRYPOINT ["app-entrypoint"]
+# Entrypoint bawaan image (docker-php-entrypoint) sengaja tidak ditimpa.
+# Perintah default adalah script aplikasi kita, yang berakhir dengan
+# `exec apache2-foreground` supaya Apache menjadi PID 1 dan menerima signal
+# stop dari Platform.
+CMD ["/usr/local/bin/entrypoint.sh"]
