@@ -479,8 +479,86 @@ class TrustedProxyBehaviourTest extends TestCase
         $this->assertStringContainsString('needs: tests', $workflow);
         $this->assertStringContainsString('docker build -t pdf-to-markdown .', $workflow);
         $this->assertStringContainsString('http://localhost:8080/pdf-to-markdown', $workflow);
+    }
 
-        // Tanpa --retry-connrefused, curl berhenti saat container belum siap.
-        $this->assertStringContainsString('--retry-connrefused', $workflow);
+    /**
+     * Flag retry curl harus menangani SEMUA error transient.
+     *
+     * Entry container menjalankan 7 perintah artisan sebelum Apache listen.
+     * Selama masa itu port sudah dipetakan tapi belum ada yang mendengarkan,
+     * sehingga koneksi berakhir sebagai "connection refused" (curl 7) atau
+     * "connection reset by peer" (curl 56).
+     *
+     * --retry-connrefused saja TIDAK cukup: curl berhenti di percobaan pertama
+     * saat jawabannya 56. Karena itu --retry-all-errors yang dipakai.
+     */
+    public function test_ci_smoke_test_mengulang_semua_error(): void
+    {
+        $workflow = (string) file_get_contents(\base_path('.github/workflows/tests.yml'));
+
+        $this->assertStringContainsString(
+            '--retry-all-errors',
+            $workflow,
+            'Smoke test wajib memakai --retry-all-errors'
+        );
+
+        // Retry harus cukup lama untuk 7 boot artisan + start Apache.
+        $this->assertStringContainsString('--retry 15', $workflow);
+        $this->assertStringContainsString('--retry-delay 2', $workflow);
+
+        // --retry-connrefused saja sudah tidak cukup dan boleh diganti,
+        // tapi flag --retry harus tetap ada.
+        $this->assertStringContainsString('--retry ', $workflow);
+        $this->assertStringContainsString('--fail', $workflow);
+
+        // Batas per percobaan, supaya satu percobaan yang menggantung tidak
+        // menghabiskan seluruh budget retry.
+        $this->assertStringContainsString('--connect-timeout', $workflow);
+    }
+
+    /**
+     * Harus ada langkah diagnostik yang jalan saat job gagal.
+     *
+     * Tanpa ini, kegagalan smoke test hanya memberi tahu "curl (56)"
+     * tanpa penyebabnya. Penyebab sebenarnya ada di log container.
+     */
+    public function test_ci_menampilkan_log_container_saat_gagal(): void
+    {
+        $workflow = (string) file_get_contents(\base_path('.github/workflows/tests.yml'));
+
+        $this->assertStringContainsString(
+            'if: failure()',
+            $workflow,
+            'Harus ada langkah diagnostik dengan if: failure()'
+        );
+
+        $this->assertStringContainsString('docker logs pdf-md-smoke', $workflow);
+        $this->assertStringContainsString('docker ps -a', $workflow);
+
+        // Status container (exit code, OOM) accelerating mencari penyebab.
+        $this->assertStringContainsString('docker inspect', $workflow);
+    }
+
+    /**
+     * Pemeriksaan isi halaman harus tahan terhadap URL absolut.
+     *
+     * route() di Laravel menghasilkan URL absolut, jadi atribut action berisi
+     * "http://localhost/pdf-to-markdown", bukan "/pdf-to-markdown".
+     * Pola yang memaksa path relatif akan selalu gagal meski halaman sehat.
+     */
+    public function test_pemeriksaan_halaman_tahan_terhadap_url_absolut(): void
+    {
+        $workflow = (string) file_get_contents(\base_path('.github/workflows/tests.yml'));
+
+        // Pola action harus menerima bentuk absolut maupun relatif.
+        $this->assertStringContainsString(
+            'action="[^"]*/pdf-to-markdown"',
+            $workflow,
+            'Pola action harus menerima URL absolut dari route()'
+        );
+
+        // Form upload harus dicek lewat atribut yang memang ada di HTML.
+        $this->assertStringContainsString('name="_token"', $workflow);
+        $this->assertStringContainsString('enctype="multipart/form-data"', $workflow);
     }
 }

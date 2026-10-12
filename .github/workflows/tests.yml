@@ -129,14 +129,27 @@ jobs:
             -e SESSION_SECURE_COOKIE=0 \
             pdf-to-markdown
 
-      # --retry-connrefused WAJIB ada: tanpa itu curl tidak mengulang saat
-      # container masih starting dan balasannya "connection refused".
+# Entry container melakukan 7 perintah artisan (package:discover,
+      # config:clear/cache, route:clear/cache, view:clear/cache) sebelum
+      # Apache benar-benar listen. Selama masa itu port sudah dipetakan tapi
+      # belum ada yang mendengarkan, sehingga koneksi bisa berakhir sebagai
+      # "connection refused" (curl 7) ATAU "connection reset by peer" (curl 56)
+      # tergantung cara Docker memetakan portnya.
+      #
+      # --retry-all-errors wajib dipakai, bukan hanya --retry-connrefused:
+      # dengan flag yang lama, curl berhenti di percobaan pertama saat
+      # jawabannya 56, padahal Apache sebenarnya belum siap.
+      #
       # --fail membuat HTTP 4xx/5xx dianggap gagal, bukan sukses diam-diam.
       - name: Pastikan halaman converter terbuka
         run: |
-          curl --fail --retry 10 --retry-delay 3 --retry-connrefused \
-            http://localhost:8080/pdf-to-markdown \
-            --output /tmp/page.html
+          curl --fail \
+               --retry 15 \
+               --retry-delay 2 \
+               --retry-all-errors \
+               --connect-timeout 5 \
+               http://localhost:8080/pdf-to-markdown \
+               --output /tmp/page.html
 
           # HTTP 200 saja belum cukup: cek isi halamannya bener-bener
           # render form converter.
@@ -144,18 +157,57 @@ jobs:
             echo "::error::Halaman terbuka tapi tidak memuat form converter."
             exit 1;
           }
-          grep -q "action=\"/pdf-to-markdown\"" /tmp/page.html || {
-            echo "::error::Form upload tidak ada di halaman."
+
+          # Catatan: route() di Laravel menghasilkan URL ABSOLUT, jadi nilainya
+          # bisa "http://localhost/pdf-to-markdown" maupun "/pdf-to-markdown".
+          # Karena itu pola di bawah tidak memaksa bentuk tertentu.
+          grep -q 'action="[^"]*/pdf-to-markdown"' /tmp/page.html || {
+            echo "::error::Form upload tidak mengarah ke /pdf-to-markdown."
+            exit 1;
+          }
+
+          # Form harus punya CSRF token dan multipart, kalau tidak upload
+          # pasti ditolak.
+          grep -q 'name="_token"' /tmp/page.html || {
+            echo "::error::Form upload tidak punya token CSRF."
+            exit 1;
+          }
+          grep -q 'enctype="multipart/form-data"' /tmp/page.html || {
+            echo "::error::Form bukan multipart, file tidak akan terkirim."
             exit 1;
           }
 
           echo "OK: halaman converter merespons 200 dan berisi form upload."
 
-      # Kalau langkah di atas gagal, log container sangat dibutuhkan untuk
-      # melihat pesan error dari entrypoint (mis. "requires ext-zip").
+      # Kalau smoke test gagal, penyebabnya hampir selalu ada di log container
+      # (entrypoint, config:cache, atau Apache yang tidak mau start).
+      # Langkah ini yang membuatnya terlihat, jadi JANGAN dihapus.
+      - name: Diagnosis kegagalan container
+        if: failure()
+        run: |
+          echo "::group::Daftar container"
+          docker ps -a --filter "name=pdf-md-smoke" || true
+          docker ps -a || true
+          echo "::endgroup::"
+
+          echo "::group::Status container"
+          docker inspect --format 'status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}}' \
+            pdf-md-smoke || echo "Container tidak ada (mungkin gagal sebelum dibuat)"
+          echo "::endgroup::"
+
+          echo "::group::Log container"
+          docker logs pdf-md-smoke 2>&1 || echo "Log tidak bisa dibaca"
+          echo "::endgroup::"
+
+          echo "::group::Port yang dipetakan"
+          docker port pdf-md-smoke || echo "Tidak ada port yang terpetakan"
+          echo "::endgroup::"
+
+      # Log juga ditampilkan saat job sukses, supaya ada jejak bahwa Apache
+      # benar-benar sempat jalan dan bukan sekadar DNS yang menjawab.
       - name: Tampilkan log container
         if: always()
-        run: docker logs pdf-md-smoke || true
+        run: docker logs pdf-md-smoke 2>&1 || true
 
       - name: Bersihkan container
         if: always()
