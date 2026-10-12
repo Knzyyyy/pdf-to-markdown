@@ -1,0 +1,69 @@
+# =============================================================================
+#  Berkas yang TIDAK ikut copy ke build context.
+#
+#  Efeknya: (1) context lebih kecil sehingga build lebih cepat, dan
+#  (2) secret maupun hasil build lokal tidak pernah bocor ke dalam image.
+#
+#  Docker mendukung pola pengecualian dengan tanda "!", sama seperti
+#  .gitignore. Urutan penting: pengecualian harus ditulis SETELAH polanya.
+# =============================================================================
+
+# --- Version control ---
+.git
+.gitignore
+.github
+
+# --- Secret dan konfigurasi lokal ---
+# .env TIDAK boleh masuk image. Seluruh konfigurasi dibaca dari environment
+# variable yang diset di Render/Railway. .env.example tetap ikut karena
+# hanya berisi nama variabel, bukan nilainya.
+.env
+.env.*
+!.env.example
+
+# --- Dependency yang dibangun ulang di dalam image ---
+# node_modules dibangun di tahap "assets" (npm ci)
+# vendor dibangun di tahap "vendor" (composer install)
+node_modules
+vendor
+
+# --- Hasil build lokal ---
+# Asset dibangun ulang di tahap "assets", jadi hasil di mesin tidak perlu ikut.
+public/build
+public/hot
+public/storage
+
+# --- Log dan cache runtime ---
+storage/logs/*
+storage/framework/cache/data/*
+storage/framework/sessions/*
+storage/framework/views/*
+bootstrap/cache/*.php
+
+# --- Testing ---
+# Image produksi tidak menjalankan test, dan membawanya hanya menambah ukuran.
+# Kalau mau menjalankan test di dalam container, hapus blok ini lalu rebuild.
+tests
+phpunit.xml
+.phpunit.result.cache
+.phpunit.cache
+
+# --- Dokumentasi ---
+# README tetap ikut karena tetap dibaca orang yang memakai image.
+docs
+*.md
+!README.md
+
+# --- Berkas alat editor & OS ---
+.editorconfig
+.DS_Store
+Thumbs.db
+.idea
+.vscode
+*.swp
+*~
+npm-debug.log
+yarn-error.log
+Homestead.json
+Homestead.yaml
+auth.json
