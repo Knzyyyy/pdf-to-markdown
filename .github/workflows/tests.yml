@@ -1,0 +1,87 @@
+name: Tests
+
+# Workflow ini menjalankan test otomatis setiap kali ada push atau Pull Request.
+# Tujuannya: kalau ada yang rusak, ketahuan sebelum kode masuk ke branch utama.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main, master]
+
+# Batalkan eksekusi lama kalau ada commit baru (hemat kuota runner).
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: PHP ${{ matrix.php }} / Composer ${{ matrix.composer }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      # Gagal kalau salah satu kombinasi gagal.
+      fail-fast: false
+      matrix:
+        php: ['8.1', '8.2', '8.3']
+        composer: ['prefer-dist']
+        include:
+          - php: '8.3'
+            coverage: xdebug
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          # ext-zip WAJIB: fiturnya ada di require composer.json, jadi
+          # tanpa extension ini `composer install` akan gagal.
+          extensions: zip, mbstring, dom, fileinfo, iconv, zlib
+          coverage: none
+          tools: composer:v2
+
+      - name: Validasi composer.json
+        run: composer validate --strict
+
+      - name: Install dependency PHP
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      # Tanpa APP_KEY, session dan cookie enkripsi tidak bisa dipakai dan
+      # hampir semua test fitur akan gagal.
+      - name: Siapkan file .env untuk testing
+        run: |
+          cp .env.example .env
+          php artisan key:generate --force
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependency Node
+        run: npm ci
+
+      # Penting: halaman memakai @vite, jadi manifest harus ada. Tanpa
+      # langkah ini, semua test fitur akan gagal dengan error 500.
+      - name: Build asset frontend
+        run: npm run build
+
+      - name: Jalankan test
+        run: php artisan test
+
+      - name: Cek format kode
+        if: matrix.php == '8.3'
+        run: vendor/bin/pint --test
+
+      - name: Pastikan tidak ada secret yang ikut ter-commit
+        if: matrix.php == '8.3'
+        run: |
+          if git ls-files --error-unmatch .env >/dev/null 2>&1; then
+            echo "::error::File .env ikut ter-commit. Hapus dari repository."
+            exit 1
+          fi
+          echo "Aman: .env tidak ter-commit."
