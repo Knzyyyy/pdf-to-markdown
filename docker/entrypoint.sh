@@ -56,6 +56,37 @@ mkdir -p \
 chown -R www-data:www-data storage bootstrap/cache
 
 # -----------------------------------------------------------------------------
+# 2b. session.cookie_secure mengikuti environment variable.
+#
+#     php.ini tidak bisa membaca env var secara langsung, jadi nilainya
+#     ditulis ke file .ini terpisah. File ini berada di conf.d, sehingga
+#     otomatis terbaca oleh PHP tanpa perlu restart.
+#
+#     1 -> hanya HTTPS. Benar untuk Render/Railway.
+#     0 -> izinkan HTTP. WAJIB untuk smoke test lewat http://localhost,
+#          kalau tidak cookie session tidak akan pernah terkirim.
+#
+#     Nilainya divalidasi ketat supaya hanya "0" atau "1" yang diterima.
+#     Nilai lain diabaikan supaya konfigurasi salah tidak diam-diam membuat
+#     cookie berjalan tanpa proteksi.
+# -----------------------------------------------------------------------------
+SESSION_SECURE_COOKIE="${SESSION_SECURE_COOKIE:-1}"
+
+case "$SESSION_SECURE_COOKIE" in
+    0|1) ;;
+    *)
+        echo "[startup] PERINGATAN: SESSION_SECURE_COOKIE=\"${SESSION_SECURE_COOKIE}\" tidak valid." >&2
+        echo "[startup] Nilai yang dipakai: 1 (hanya HTTPS)." >&2
+        SESSION_SECURE_COOKIE=1
+        ;;
+esac
+
+printf 'session.cookie_secure = %s\n' "$SESSION_SECURE_COOKIE" \
+    > /usr/local/etc/php/conf.d/zz-session-secure.ini
+
+echo "[startup] session.cookie_secure=${SESSION_SECURE_COOKIE}"
+
+# -----------------------------------------------------------------------------
 # 3. Cache lama dibuang dulu.
 #    Kalau tidak, hasil build lama masih dipakai dan env baru diabaikan.
 # -----------------------------------------------------------------------------
