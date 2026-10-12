@@ -282,8 +282,14 @@ Berkas pendukung:
   `route:cache` memblokir environment variable. Kalau dibuat saat build,
   aplikasi akan memakai nilai build yang kosong dan mengabaikan `APP_KEY` /
   `APP_URL` milik Platform. Karena itu keduanya dijalankan di `entrypoint.sh`.
-- **Container gagal start bila `APP_KEY` belum diisi.** Ini disengaja:
-  lebih baik gagal start daripada berjalan dengan enkripsi cookie yang salah.
+- **Container gagal start bila `APP_KEY` belum diisi.** `entrypoint.sh`
+  memeriksanya paling awal dan keluar dengan `exit 1` plus pesan yang
+  menyebutkan cara memperbaikinya. Ini penting karena
+  `php artisan config:cache` sendiri **tidak** gagal saat `APP_KEY` kosong —
+  perintahnya tetap exit 0, key kosong ikut tersimpan ke cache, lalu
+  aplikasi berjalan dengan enkripsi cookie yang tidak valid. Gejalanya baru
+  muncul belakangan: session tidak terbaca dan pengguna selalu terlihat
+  "logout terus" tanpa pesan error yang jelas.
 - **`opcache.validate_timestamps = 0`.** Kode di dalam image tidak berubah
   saat container berjalan. Setelah mengubah kode, build ulang image.
 - **`SESSION_SECURE_COOKIE` mengatur `session.cookie_secure`.** Nilai `1`

@@ -21,6 +21,37 @@ set -eu
 PORT="${PORT:-8080}"
 DOCROOT="${APACHE_DOCUMENT_ROOT:-/var/www/html/public}"
 
+# -----------------------------------------------------------------------------
+# 0. Cek APP_KEY, gagal secepat mungkin.
+#
+#    Kenapa perlu dicek di sini, bukan mengandalkan artisan:
+#    sudah diuji bahwa `php artisan config:cache` TIDAK gagal saat APP_KEY
+#    kosong. Perintahnya tetap exit 0, key kosong ikut tersimpan ke cache,
+#    lalu aplikasi berjalan dengan enkripsi cookie yang tidak valid. Gejalanya
+#    baru muncul nanti: session tidak bisa dibaca dan pengguna selalu
+#    terlihat "logout terus" tanpa pesan error yang jelas.
+#
+#    Jadi tanpa menebak, container sengaja dihentikan di sini.
+#    APP_KEY hanya dibaca untuk dicek ada atau tidak; nilainya tidak pernah
+#    dicetak ke log.
+# -----------------------------------------------------------------------------
+if [ -z "${APP_KEY:-}" ]; then
+    {
+        echo "[startup] ERROR: APP_KEY belum diisi."
+        echo "[startup]"
+        echo "[startup] Buat APP_KEY dengan:"
+        echo "[startup]     php artisan key:generate --show"
+        echo "[startup]"
+        echo "[startup] Lalu jalankan ulang, contoh:"
+        echo "[startup]     docker run -e APP_KEY=base64:xxxxxxxx... pdf-to-markdown"
+        echo "[startup]"
+        echo "[startup] Di Render/Railway, isi variabel APP_KEY di dashboard."
+    } >&2
+
+    exit 1
+fi
+
+echo "[startup] APP_KEY terbaca (${#APP_KEY} karakter)"
 echo "[startup] port=${PORT} documentroot=${DOCROOT}"
 
 # -----------------------------------------------------------------------------# 1. Apache harus membaca port dari environment variable.#    File konfigurasi Apache tidak bisa melakukan interpolasi ${PORT},#    jadi nilainya ditulis lewat sed setiap kali container start.##    Dua jebakan yang sudah dihindari di sini:##    a) Anchor "$" milik regex harus di-escape menjadi "\$". Tanpa escape,#       shell membaca "$!" sebagai variabel dan menghapusnya, sehingga#       ekspresi sed jadi tidak lengkap dan port TIDAKAKAN terganti.##    b) Semua perintah wajib idempoten, karena entrypoint ini berjalan lagi#       setiap container start ulang. Kalau tidak, DocumentRoot akan#       menjadi /var/www/html/public/public pada start kedua.# -----------------------------------------------------------------------------sed -ri "s!^Listen[[:space:]]*[0-9]+\$!Listen ${PORT}!" /etc/apache2/ports.conf
@@ -104,9 +135,12 @@ gosu www-data php artisan package:discover --ansi --no-interaction
 
 # -----------------------------------------------------------------------------
 # 4. Cache untuk produksi.
-#    config:cache akan GAGAL dengan pesan jelas bila APP_KEY belum diisi.
-#    Itu memang perilaku yang diinginkan: lebih baik container gagal start
-#    daripada berjalan dengan enkripsi cookie yang tidak valid.
+#
+#    CATATAN: config:cache sendiri TIDAK gagal ketika APP_KEY kosong. Itu
+#    sudah diuji: perintahnya tetap exit 0 dan key kosong ikut tersimpan ke
+#    cache. Kegagalan datang dari pengecekan APP_KEY di bagian 0 di atas.
+#
+#    Karena itu pengecekan itu harus jadi, bukan sekadar andal belaka.
 # -----------------------------------------------------------------------------
 gosu www-data php artisan config:cache --no-ansi
 gosu www-data php artisan route:cache --no-ansi

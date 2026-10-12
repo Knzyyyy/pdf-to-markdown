@@ -469,6 +469,111 @@ class TrustedProxyBehaviourTest extends TestCase
     }
 
     /**
+     * entrypoint harus menolak start bila APP_KEY kosong.
+     *
+     * Penting karena `php artisan config:cache` TIDAK gagal tanpa APP_KEY.
+     * Perintahnya tetap exit 0, key kosong ikut tersimpan ke cache, lalu
+     * aplikasi berjalan dengan enkripsi cookie yang tidak valid. Gejalanya
+     * baru muncul belakangan dan tidak jelas: session tidak terbaca sehingga
+     * pengguna selalu terlihat "logout terus".
+     *
+     * Karena itu gerbang ini harus ada dan harus menolak nilai kosong, bukan
+     * hanya "tidak diset".
+     */
+    public function test_entrypoint_menolak_jika_app_key_kosong(): void
+    {
+        $entrypoint = (string) file_get_contents(\base_path('docker/entrypoint.sh'));
+
+        // Gerbang harus mengecek variabel dengan default kosong (${APP_KEY:-}),
+        // supaya tidak trigger error "unbound variable" dari `set -u`.
+        $this->assertMatchesRegularExpression(
+            '/if\s+\[\s*-z\s+"\$\{APP_KEY:-\}"/',
+            $entrypoint,
+            'entrypoint harus mengecek APP_KEY dengan pola ${APP_KEY:-}'
+        );
+
+        // Harus keluar dengan status bukan nol.
+        $this->assertMatchesRegularExpression(
+            '/APP_KEY belum diisi.*?exit 1/s',
+            $entrypoint,
+            'entrypoint harus exit 1 saat APP_KEY kosong'
+        );
+
+        // Pesan harus ditulis ke stderr dan menyebut cara memperbaikinya.
+        $this->assertStringContainsString('>&2', $entrypoint);
+        $this->assertStringContainsString('key:generate --show', $entrypoint);
+    }
+
+    /**
+     * Pengecekan APP_KEY harus terjadi SEBELUM perintah berat apa pun.
+     *
+     * Kalau diletakkan setelah config:cache, container sudah melakukan pekerjaan
+     * yang tidak perlu hanya untuk gagal.
+     */
+    public function test_cek_app_key_terjadi_sebelum_perintah_berat(): void
+    {
+        $entrypoint = (string) file_get_contents(\base_path('docker/entrypoint.sh'));
+
+        $gatePosition = strpos($entrypoint, 'APP_KEY belum diisi');
+        $configCache = strpos($entrypoint, 'config:cache --no-ansi');
+
+        $this->assertIsInt($gatePosition, 'Gerbang APP_KEY tidak ditemukan');
+        $this->assertIsInt($configCache, 'Perintah config:cache tidak ditemukan');
+
+        $this->assertLessThan(
+            $configCache,
+            $gatePosition,
+            'Gerbang APP_KEY harus dijalankan sebelum config:cache'
+        );
+
+        // bridge: apache2-foreground tetap harus dipanggil lewat exec supaya
+        // menjadi PID 1 dan menerima signal stop dari Platform.
+        $this->assertMatchesRegularExpression(
+            '/^exec apache2-foreground$/m',
+            $entrypoint,
+            'apache2-foreground harus dijalankan lewat exec'
+        );
+    }
+
+    /**
+     * Nilai APP_KEY tidak boleh dicetak ke log.
+     */
+    public function test_nilai_app_key_tidak_ditampilkan_di_log(): void
+    {
+        $entrypoint = (string) file_get_contents(\base_path('docker/entrypoint.sh'));
+
+        // Yang boleh: panjang karakter saja, bukan nilainya.
+        $this->assertStringContainsString('${#APP_KEY}', $entrypoint);
+        $this->assertStringNotContainsString('APP_KEY=${APP_KEY}', $entrypoint);
+        $this->assertStringNotContainsString('$APP_KEY"', $entrypoint);
+    }
+
+    /**
+     * Komentar dan dokumentasi harus sesuai perilaku sebenarnya.
+     *
+     * Klaim lama menyebut "config:cache akan GAGAL bila APP_KEY belum diisi".
+     * Itu sudah diuji salah: perintahnya exit 0. Kalau klaim salah sampai ke
+     * README, orang akan salah menduga penyebab masalah saat debugging.
+     */
+    public function test_dokumentasi_tidak_berbohong_tentang_app_key(): void
+    {
+        $readme = (string) file_get_contents(\base_path('README.md'));
+        $envExample = (string) file_get_contents(\base_path('.env.example'));
+
+        foreach (['README.md' => $readme, '.env.example' => $envExample] as $name => $content) {
+            $this->assertDoesNotMatchRegularExpression(
+                '/config:cache akan menolak/',
+                $content,
+                "{$name} masih mengklaim config:cache menolak APP_KEY kosong, padahal tidak"
+            );
+        }
+
+        // Sebaliknya, keduanya harus menyebut bahwa gerbang ada di entrypoint.
+        $this->assertStringContainsString('entrypoint', $readme);
+        $this->assertStringContainsString('entrypoint', $envExample);
+    }
+
+    /**
      * Job CI harus benar-benar membangun dan menjalankan image.
      */
     public function test_ci_memiliki_job_docker(): void
