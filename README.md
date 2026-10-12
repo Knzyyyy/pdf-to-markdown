@@ -1,5 +1,8 @@
 # PDF to Markdown Converter
 
+![Tests](https://github.com/Knzyyyy/pdf-to-markdown/actions/workflows/tests.yml/badge.svg)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+
 Ubah file PDF menjadi Markdown yang rapi — tanpa AI, tanpa API key, tanpa layanan eksternal.
 
 Dibangun dengan Laravel, Blade, dan satu library PHP ([`smalot/pdfparser`](https://github.com/smalot/pdfparser)) untuk ekstraksi teks.
