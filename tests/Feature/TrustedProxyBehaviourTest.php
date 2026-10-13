@@ -537,15 +537,39 @@ class TrustedProxyBehaviourTest extends TestCase
 
     /**
      * Nilai APP_KEY tidak boleh dicetak ke log.
+     *
+     * Yang BOLEH: panjang karakter (${#APP_KEY}) dan penyebutan kata "APP_KEY"
+     * dalam pesan. Yang TIDAK boleh: nilai aslinya, ditulis dengan $APP_KEY atau
+     * ${APP_KEY}, di dalam perintah echo.
      */
     public function test_nilai_app_key_tidak_ditampilkan_di_log(): void
     {
         $entrypoint = (string) file_get_contents(\base_path('docker/entrypoint.sh'));
 
-        // Yang boleh: panjang karakter saja, bukan nilainya.
-        $this->assertStringContainsString('${#APP_KEY}', $entrypoint);
+        $commands = preg_replace('/^\s*#.*$/m', '', $entrypoint) ?? $entrypoint;
+
+        foreach (explode("\n", $commands) as $line) {
+            if (! str_starts_with(trim($line), 'echo ')) {
+                continue;
+            }
+
+            // Panjang karakter boleh, nilai aslinya tidak.
+            $withoutLength = str_replace('${#APP_KEY}', '', $line);
+
+            $this->assertStringNotContainsString(
+                '$APP_KEY',
+                $withoutLength,
+                "Nilai APP_KEY boleh dicetak di baris: {$line}"
+            );
+            $this->assertStringNotContainsString(
+                '${APP_KEY}',
+                $withoutLength,
+                "Nilai APP_KEY boleh dicetak di baris: {$line}"
+            );
+        }
+
+        // Bentuk lama yang salah harus tetap dilarang.
         $this->assertStringNotContainsString('APP_KEY=${APP_KEY}', $entrypoint);
-        $this->assertStringNotContainsString('$APP_KEY"', $entrypoint);
     }
 
     /**
@@ -617,6 +641,162 @@ class TrustedProxyBehaviourTest extends TestCase
 
         // Nama lama tidak boleh tersisa.
         $this->assertStringNotContainsString('app-entrypoint', $dockerfile);
+    }
+
+    /**
+     * Perintah untuk menjalankan artisan harus memakai runuser, bukan gosu.
+     *
+     * gosu TIDAK ada di image resmi php:apache. Dulu script memakainya dan
+     * container langsung mati dengan "gosu: not found" sebelum Apache sempat
+     * start; di CI yang terlihat hanya "connection refused" yang menyesatkan.
+     *
+     * runuser datang dari paket util-linux yang essential di Debian, dan image
+     * ini berbasis debian:bookworm-slim, jadi tidak perlu paket tambahan.
+     */
+    public function test_entrypoint_memakai_runuser_bukan_gosu(): void
+    {
+        $entrypoint = (string) file_get_contents(\base_path('docker/entrypoint.sh'));
+        $dockerfile = (string) file_get_contents(\base_path('Dockerfile'));
+
+        // Buang komentar: penyebutan gosu di komentar sejarah itu wajar.
+        $commands = preg_replace('/^\s*#.*$/m', '', $entrypoint) ?? $entrypoint;
+
+        $this->assertDoesNotMatchRegularExpression(
+            '/\bgosu\b/',
+            $commands,
+            'entrypoint tidak boleh memanggil gosu, perintah itu tidak ada di image'
+        );
+
+        // Semua perintah artisan harus lewat runuser.
+        //
+        // Baris echo sengaja dikecualikan: pesan bantuan seperti
+        // `echo "php artisan key:generate --show"` bukan perintah yang
+        // dijalankan, hanya teks yang ditampilkan ke pengguna.
+        $executable = array_filter(
+            explode("\n", $commands),
+            static fn (string $line): bool => ! str_starts_with(trim($line), 'echo ')
+                && str_contains($line, 'php artisan'),
+        );
+
+        $this->assertNotEmpty($executable, 'Tidak ada perintah artisan di entrypoint');
+
+        foreach ($executable as $line) {
+            if (str_contains($line, '|| true')) {
+                continue; // perintah *_clear boleh gagal
+            }
+
+            $this->assertStringContainsString(
+                'runuser -u www-data -- php artisan',
+                $line,
+                "Perintah artisan wajib lewat runuser: {$line}"
+            );
+        }
+
+        // runuser tidak boleh dipasang lewat Dockerfile karena sudah ada.
+        $this->assertDoesNotMatchRegularExpression(
+            '/\bgosu\b/',
+            $dockerfile,
+            'Dockerfile tidak perlu memasang gosu karena tidak dipakai lagi'
+        );
+    }
+
+    /**
+     * Harus ada pemeriksaan bahwa runuser benar-benar tersedia.
+     *
+     * Pemeriksaan ini yang mengubah kegagalan "container mati bisu" menjadi
+     * pesan yang bisa dibaca di docker logs.
+     */
+    public function test_entrypoint_memeriksa_ketersediaan_runuser(): void
+    {
+        $entrypoint = (string) file_get_contents(\base_path('docker/entrypoint.sh'));
+
+        $this->assertStringContainsString(
+            'command -v runuser',
+            $entrypoint,
+            'entrypoint harus memeriksa ketersediaan runuser'
+        );
+
+        // Harus dicek SEBELUM ada perintah yang mengubah keadaan.
+        $guard = strpos($entrypoint, 'command -v runuser');
+        $firstSed = strpos($entrypoint, 'sed -ri');
+
+        $this->assertIsInt($guard);
+        $this->assertIsInt($firstSed);
+        $this->assertLessThan(
+            $firstSed,
+            $guard,
+            'Pemeriksaan runuser harus sebelum perintah sed pertama'
+        );
+
+        // Environment ke proses anak harus diverifikasi, bukan diasumsikan.
+        $this->assertStringContainsString(
+            'runuser -u www-data -- sh -c \'test -n "$APP_KEY"\'',
+            $entrypoint,
+            'Harus dipastikan APP_KEY diteruskan ke proses www-data'
+        );
+    }
+
+    /**
+     * Langkah cache TIDAK boleh memakai "|| true".
+     *
+     * Kegagalan harus menghentikan start dengan pesan jelas. Kalau diabaikan,
+     * aplikasi berjalan dengan cache yang tidak lengkap dan gejalanya muncul
+     * jauh kemudian tanpa sebab yang jelas.
+     */
+    public function test_langkah_cache_tidak_boleh_mengabaikan_kegagalan(): void
+    {
+        $entrypoint = (string) file_get_contents(\base_path('docker/entrypoint.sh'));
+
+        $commands = preg_replace('/^\s*#.*$/m', '', $entrypoint) ?? $entrypoint;
+
+        foreach ([
+            'config:cache',
+            'route:cache',
+            'view:cache',
+            'package:discover',
+        ] as $command) {
+            foreach (explode("\n", $commands) as $line) {
+                if (str_contains($line, "artisan {$command}") && ! str_contains($line, '*:clear')) {
+                    $this->assertStringNotContainsString(
+                        '|| true',
+                        $line,
+                        "Langkah {$command} tidak boleh memakai || true"
+                    );
+                }
+            }
+        }
+
+        // Setiap langkah harus memberi jejak di log, supaya docker logs
+        // menunjukkan di bagian mana start berhenti.
+        foreach (['1/4', '2/4', '3/4', '4/4'] as $marker) {
+            $this->assertStringContainsString($marker, $entrypoint, "Penanda langkah {$marker} hilang");
+        }
+    }
+
+    /**
+     * Apache harus bisa menulis ke storage dan bootstrap/cache.
+     */
+    public function test_entrypoint_menjamin_ownership_www_data(): void
+    {
+        $entrypoint = (string) file_get_contents(\base_path('docker/entrypoint.sh'));
+
+        // chown harus dilakukan sebelum DAN sesudah langkah cache.
+        $this->assertSame(
+            2,
+            preg_match_all('/chown -R www-data:www-data storage bootstrap\/cache/', $entrypoint),
+            'chown harus dilakukan dua kali: sebelum dan sesudah langkah cache'
+        );
+
+        $firstChown = strpos($entrypoint, 'chown -R www-data');
+        $packageDiscover = strpos($entrypoint, 'package:discover --ansi');
+
+        $this->assertIsInt($firstChown);
+        $this->assertIsInt($packageDiscover);
+        $this->assertLessThan(
+            $packageDiscover,
+            $firstChown,
+            'chown pertama harus sebelum langkah artisan'
+        );
     }
 
     /**
