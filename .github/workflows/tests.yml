@@ -180,27 +180,98 @@ jobs:
           echo "OK: halaman converter merespons 200 dan berisi form upload."
 
       # Kalau smoke test gagal, penyebabnya hampir selalu ada di log container
-      # (entrypoint, config:cache, atau Apache yang tidak mau start).
+# (entrypoint, config:cache, atau Apache yang tidak mau start).
       # Langkah ini yang membuatnya terlihat, jadi JANGAN dihapus.
+      #
+      # Diagnosis sengaja memakai "set +e" dan menambahkan || true di setiap
+      # perintah: kalau satu pemeriksaan gagal, pemeriksaan lain tetap jalan.
+      # Langkah diagnostik yang ikut gagal hanya akan menyembunyikan informasi.
       - name: Diagnosis kegagalan container
         if: failure()
+        env:
+          CONTAINER: pdf-md-smoke
         run: |
-          echo "::group::Daftar container"
-          docker ps -a --filter "name=pdf-md-smoke" || true
-          docker ps -a || true
-          echo "::endgroup::"
+          set +e
 
           echo "::group::Status container"
+          docker ps -a --filter "name=${CONTAINER}" || true
+          docker ps -a || true
           docker inspect --format 'status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}}' \
-            pdf-md-smoke || echo "Container tidak ada (mungkin gagal sebelum dibuat)"
+            "${CONTAINER}" || echo "Container tidak ada (mungkin gagal sebelum dibuat)"
+          RUNNING="$(docker inspect --format '{{.State.Running}}' "${CONTAINER}" 2>/dev/null)"
+          echo "running=${RUNNING}"
           echo "::endgroup::"
 
-          echo "::group::Log container"
-          docker logs pdf-md-smoke 2>&1 || echo "Log tidak bisa dibaca"
+          echo "::group::Log container (docker logs)"
+          docker logs "${CONTAINER}" 2>&1 || echo "Log tidak bisa dibaca"
+          echo "::endgroup::"
+
+          # Membaca berkas dari DALAM container. Kalau container sudah berhenti,
+          # docker exec tidak bisa dipakai, jadi dipakai docker cp.
+          # Argumen: <path di dalam container> <label> [jumlah baris terakhir]
+          #
+          # tail dilakukan DI DALAM container supaya log yang besar tidak
+          # ikut tertransfer ke runner.
+          baca_berkas() {
+            path="$1"
+            label="$2"
+            max="${3:-0}"
+            tmp="$(mktemp)"
+
+            if [ "${RUNNING}" = "true" ]; then
+              if [ "${max}" -gt 0 ]; then
+                docker exec "${CONTAINER}" sh -c "test -f ${path} && tail -n ${max} ${path} || echo '${label} TIDAK ADA'" 2>/dev/null
+              else
+                docker exec "${CONTAINER}" sh -c "test -f ${path} && cat ${path} || echo '${label} TIDAK ADA'" 2>/dev/null
+              fi
+            elif docker cp "${CONTAINER}:${path}" "${tmp}" 2>/dev/null; then
+              if [ "${max}" -gt 0 ]; then
+                tail -n "${max}" "${tmp}"
+              else
+                cat "${tmp}"
+              fi
+            else
+              echo "${label} TIDAK ADA"
+            fi
+
+            rm -f "${tmp}"
+          }
+
+          echo "::group::laravel.log (80 baris terakhir)"
+          baca_berkas /var/www/html/storage/logs/laravel.log 'laravel.log' 80
+          echo "::endgroup::"
+
+          echo "::group::Vite manifest"
+          manifest="$(baca_berkas /var/www/html/public/build/manifest.json 'manifest.json')"
+          echo "${manifest}"
+          if [ "${manifest}" = "manifest.json TIDAK ADA" ]; then
+            echo "::error::manifest.json tidak ada di dalam image."
+            echo "::error::Halaman balas HTTP 500 karena @vite() tidak bisa menemukan manifest."
+            echo "::error::Periksa tahap 'assets' di Dockerfile: npm run build harus menulis ke public/build."
+          fi
+          echo "::endgroup::"
+
+          echo "::group::Izin folder yang ditulis aplikasi"
+          if [ "${RUNNING}" = "true" ]; then
+            docker exec "${CONTAINER}" ls -ld /var/www/html/storage /var/www/html/bootstrap/cache 2>&1 || true
+          else
+            echo "Container berhenti, docker exec tidak bisa dipakai."
+            echo "ls -ld hanya bisa dibaca SELAMA container hidup."
+            echo "Yang bisa dicek dari luar:"
+            docker cp "${CONTAINER}:/var/www/html/storage/framework" "${PWD}/fw-dump" 2>/dev/null \
+              && ls -ld "${PWD}/fw-dump" \
+              || echo "Tidak bisa menyalin /var/www/html/storage/framework"
+            rm -rf "${PWD}/fw-dump"
+          fi
+          echo "::endgroup::"
+
+          echo "::group::Body respons 500"
+          curl -s http://localhost:8080/pdf-to-markdown | head -c 2000
+          echo
           echo "::endgroup::"
 
           echo "::group::Port yang dipetakan"
-          docker port pdf-md-smoke || echo "Tidak ada port yang terpetakan"
+          docker port "${CONTAINER}" || echo "Tidak ada port yang terpetakan"
           echo "::endgroup::"
 
       # Log juga ditampilkan saat job sukses, supaya ada jejak bahwa Apache

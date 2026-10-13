@@ -871,6 +871,176 @@ class TrustedProxyBehaviourTest extends TestCase
     }
 
     /**
+     * Langkah diagnosis harus memeriksa EMPAT hal saat smoke test balas 500.
+     *
+     * Apache sudah listen (bukan connection refused), jadi container hidup dan
+     * Docker saja tidak cukup: penyebabnya ada DI DALAM image, yaitu
+     * laravel.log, manifest Vite, dan hak tulis folder.
+     */
+    public function test_ci_diagnosis_500_menampilkan_log_manifest_dan_izin(): void
+    {
+        $diagnosis = $this->ambil_script_langkah_diagnosis();
+
+        // 1. Isi laravel.log: 80 baris terakhir, bukan log penuh.
+        //
+        // Angka 80 diteruskan sebagai ARGUMEN ke helper, dan helper memakai
+        // "tail -n ${max}". Dua hal ini diuji terpisah karena keduanya perlu.
+        $this->assertStringContainsString('storage/logs/laravel.log', $diagnosis);
+        $this->assertStringContainsString('tail -n ${max}', $diagnosis);
+        $this->assertStringContainsString(
+            "'laravel.log' 80",
+            $diagnosis,
+            'Harus meminta 80 baris terakhir lewat parameter ke helper'
+        );
+
+        // tail harus dilakukan di DALAM container supaya log besar tidak
+        // ikut tertransfer ke runner.
+        $this->assertStringContainsString('2>/dev/null', $diagnosis);
+
+        // 2. Manifest Vite, dengan pesan jelas kalau tidak ada.
+        $this->assertStringContainsString('public/build/manifest.json', $diagnosis);
+        $this->assertStringContainsString('manifest.json TIDAK ADA', $diagnosis);
+
+        // Manifest hilang adalah penyebab 500 yang paling mungkin, jadi harus
+        // muncul sebagai anotasi error, bukan sekadar teks di log.
+        $this->assertStringContainsString('::error::', $diagnosis);
+
+        // 3. Hak tulis folder yang ditulis aplikasi.
+        $this->assertStringContainsString(
+            'ls -ld /var/www/html/storage /var/www/html/bootstrap/cache',
+            $diagnosis
+        );
+
+        // 4. Body respons 500, dipotong supaya log tidak meledak.
+        $this->assertStringContainsString(
+            'curl -s http://localhost:8080/pdf-to-markdown | head -c 2000',
+            $diagnosis
+        );
+    }
+
+    /**
+     * Diagnostik tidak boleh menggagalkan dirinya sendiri.
+     *
+     * Kalau satu pemeriksaan error dan langkah ikut berhenti, pemeriksaan
+     * setelahnya tidak pernah jalan dan informasi justru hilang.
+     */
+    public function test_ci_diagnosis_tidak_berhenti_di_check_yang_gagal(): void
+    {
+        $diagnosis = $this->ambil_script_langkah_diagnosis();
+
+        // errexit harus dimatikan, dan itu harus pernyataan PERTAMA supaya berlaku
+        // sebelum perintah apa pun dijalankan.
+        $this->assertStringContainsString(
+            'set +e',
+            $diagnosis,
+            'Langkah diagnosis wajib mulai dengan set +e'
+        );
+        $firstCodeLine = '';
+        foreach (explode("\n", $diagnosis) as $line) {
+            if (trim($line) !== '' && ! str_starts_with(trim($line), '#')) {
+                $firstCodeLine = trim($line);
+                break;
+            }
+        }
+        $this->assertSame(
+            'set +e',
+            $firstCodeLine,
+            'set +e harus menjadi perintah pertama, bukan di tengah'
+        );
+
+        // Setiap perintah yang gagal berarti "tidak ada yang bisa dibaca"
+        // wajib ditoleransi, supaya pemeriksaan lain tetap jalan.
+        //
+        // Baris lebih dulu digabung bila memakai line-continuation (\), karena
+        // "|| echo ..." sering ada di baris kedua.
+        $joined = preg_replace('/\\\\\s*\n\s*/', ' ', $diagnosis) ?? $diagnosis;
+        $risky = ['docker logs', 'docker ps', 'docker inspect', 'docker port', 'docker cp'];
+
+        foreach (explode("\n", $joined) as $line) {
+            $trimmed = trim($line);
+
+            foreach ($risky as $needle) {
+                if (str_starts_with($trimmed, $needle) && ! str_contains($trimmed, '||')) {
+                    $this->fail("Perintah '{$needle}' tanpa toleransi gagal: {$trimmed}");
+                }
+            }
+        }
+
+        // curl-body DIKECUALIKAN dengan sengaja: "curl | head -c 2000" membuat
+        // head menutup pipe begitu 2000 byte terkumpul, sehingga curl
+        // menerima SIGPIPE dan keluar non-zero WAJIB pun meski responsnya
+        // sukses. Menuntut "|| true" di sana akan menyesatkan.
+
+        // Nama container harus lewat env, bukan ditulis ulang di banyak tempat.
+        $workflow = (string) file_get_contents(\base_path('.github/workflows/tests.yml'));
+        $this->assertMatchesRegularExpression('/CONTAINER:\s*pdf-md-smoke/', $workflow);
+    }
+
+    /**
+     * Kalau container sudah berhenti, docker exec tidak bisa dipakai.
+     *
+     * Jalur cadangan ini wajib ada. Tanpa itu, gejala sebenarnya akan
+     * tertutup oleh pesan "No such container" yang menyesatkan.
+     */
+    public function test_ci_diagnosis_menangani_container_yang_sudah_berhenti(): void
+    {
+        $diagnosis = $this->ambil_script_langkah_diagnosis();
+
+        // Status running harus dibaca lebih dulu.
+        $this->assertStringContainsString('State.Running', $diagnosis);
+
+        // Cadangan lewat docker cp.
+        $this->assertStringContainsString('docker cp', $diagnosis);
+        $this->assertStringContainsString('RUNNING', $diagnosis);
+    }
+
+    /**
+     * Ambil script run milik langkah "Diagnosis kegagalan container".
+     *
+     * Mengambil per langkah, bukan seluruh workflow, supaya assertion tidak
+     * bisa lolos karena string yang sama muncul di langkah lain.
+     *
+     * Yang dikembalikan adalah ISI script saja (tanpa kunci YAML), supaya
+     * pemeriksaan "perintah pertama" tidak tertukar dengan "- name: ...".
+     */
+    private function ambil_script_langkah_diagnosis(): string
+    {
+        $workflow = (string) file_get_contents(\base_path('.github/workflows/tests.yml'));
+
+        $this->assertStringContainsString(
+            '- name: Diagnosis kegagalan container',
+            $workflow,
+            'Langkah diagnosis harus ada di workflow'
+        );
+
+        // Dari nama langkah sampai langkah berikutnya.
+        preg_match(
+            '/- name: Diagnosis kegagalan container.*?\n(?=\s+- name:|\s*# Log juga)/s',
+            $workflow,
+            $match
+        );
+
+        $this->assertNotEmpty($match, 'Blok langkah diagnosis tidak bisa dipotong');
+
+        // Potong bagian sebelum "run: |".
+        $parts = preg_split('/^\s*run: \|\s*$/m', $match[0], 2);
+
+        $this->assertCount(
+            2,
+            $parts,
+            'Langkah diagnosis harus punya blok "run: |"'
+        );
+
+        // Buang indentasi YAML (10 spasi) supaya script dibaca apa adanya.
+        $script = preg_replace('/^ {10}/m', '', $parts[1]);
+
+        $this->assertIsString($script);
+        $this->assertStringStartsWith('set +e', ltrim($script), 'Script harus diawali set +e');
+
+        return $script;
+    }
+
+    /**
      * Pemeriksaan isi halaman harus tahan terhadap URL absolut.
      *
      * route() di Laravel menghasilkan URL absolut, jadi atribut action berisi
