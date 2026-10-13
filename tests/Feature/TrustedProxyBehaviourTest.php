@@ -919,6 +919,49 @@ class TrustedProxyBehaviourTest extends TestCase
     }
 
     /**
+     * Diagnosis harus juga menampilkan konfigurasi rewrite Apache.
+     *
+     * AH00124 (loop rewrite) tidak bisa dibaca dari laravel.log karena
+     * permintaannya memang tidak pernah sampai ke PHP. Yang perlu dilihat
+     * adalah isi document root dan nilai AllowOverride.
+     */
+    public function test_ci_diagnosis_menampilkan_konfigurasi_rewrite_apache(): void
+    {
+        $diagnosis = $this->ambil_script_langkah_diagnosis();
+
+        $this->assertStringContainsString('ls -la /var/www/html/public', $diagnosis);
+        $this->assertStringContainsString('cat /var/www/html/public/.htaccess', $diagnosis);
+
+        // harus tetap memberi pesan jelas kalau .htaccess memang tidak ada.
+        $this->assertStringContainsString('.htaccess TIDAK ADA', $diagnosis);
+
+        // Naluri tiga tempat konfigurasi sekaligus: vhost, config utama, conf.
+        foreach (['sites-enabled', 'apache2.conf', 'conf-enabled'] as $tempat) {
+            $this->assertStringContainsString(
+                $tempat,
+                $diagnosis,
+                "Lokasi konfigurasi '{$tempat}' belum diperiksa"
+            );
+        }
+
+        $this->assertStringContainsString('DocumentRoot', $diagnosis);
+        $this->assertStringContainsString('AllowOverride', $diagnosis);
+        $this->assertStringContainsString('<Directory', $diagnosis);
+
+        // Alternasi grep harus tetap ditulis dengan "|" di dalam BRE.
+        $this->assertStringContainsString(
+            'DocumentRoot\\|AllowOverride\\|<Directory',
+            $diagnosis,
+            'grep BRE butuh \| untuk alternasi, bukan |'
+        );
+
+        // mod_rewrite harus dipastikan aktif.
+        $this->assertStringContainsString('apache2ctl -M', $diagnosis);
+        $this->assertStringContainsString('grep rewrite', $diagnosis);
+        $this->assertStringContainsString('mod_rewrite TIDAK aktif', $diagnosis);
+    }
+
+    /**
      * Diagnostik tidak boleh menggagalkan dirinya sendiri.
      *
      * Kalau satu pemeriksaan error dan langkah ikut berhenti, pemeriksaan
@@ -992,6 +1035,166 @@ class TrustedProxyBehaviourTest extends TestCase
         // Cadangan lewat docker cp.
         $this->assertStringContainsString('docker cp', $diagnosis);
         $this->assertStringContainsString('RUNNING', $diagnosis);
+    }
+
+    /**
+     * DocumentRoot harus benar-benar berisi front controller dan .htaccess.
+     *
+     * Docker menyalin ISI folder sumber, bukan foldernya sendiri. Karena itu
+     * "COPY public ./" menaruh index.php di /var/www/html/index.php, satu
+     * tingkat di ATAS document root.
+     *
+     * Akibatnya /var/www/html/public hanya berisi hasil build Vite, dan
+     * aturan rewrite di .htaccess tidak pernah dijalankan.
+     */
+    public function test_dockerfile_menyalin_public_ke_dalam_document_root(): void
+    {
+        $dockerfile = (string) file_get_contents(\base_path('Dockerfile'));
+
+        // Bentuk yang benar.
+        $this->assertMatchesRegularExpression(
+            '/^COPY public \.\/public$/m',
+            $dockerfile,
+            'public/ harus disalin ke ./public, bukan ke .'
+        );
+
+        // Bentuk yang salah. Penting memakai jangkar akhir baris, karena
+        // "COPY public ./public" secara tekstual MEMILIKI "COPY public ./".
+        $this->assertDoesNotMatchRegularExpression(
+            '/^COPY public \.\/$/m',
+            $dockerfile,
+            '"COPY public ./" menaruh isi public/ satu level terlalu atas'
+        );
+
+        // Asset Vite harus masuk ke document root yang sama.
+        $this->assertMatchesRegularExpression(
+            '/^COPY --from=assets \/app\/public\/build \.\/public\/build$/m',
+            $dockerfile
+        );
+
+        // DocumentRoot di entrypoint harus persis folder itu.
+        $entrypoint = (string) file_get_contents(\base_path('docker/entrypoint.sh'));
+        $this->assertStringContainsString(
+            'DOCROOT="${APACHE_DOCUMENT_ROOT:-/var/www/html/public}"',
+            $entrypoint
+        );
+    }
+
+    /**
+     * .dockerignore tidak boleh menyingkirkan berkas yang dibutuhkan halaman.
+     *
+     * Pola seperti ".*" akan ikut mengenai .htaccess, dan "*.php" akan
+     * mengenai index.php. Keduanya membuat image tidak bisa melayani halaman.
+     */
+    public function test_dockerignore_tidak_mengecualikan_berkas_publik(): void
+    {
+        $dockerignore = (string) file_get_contents(\base_path('.dockerignore'));
+
+        // Blanket dotfile akan mengenai .htaccess.
+        $this->assertDoesNotMatchRegularExpression(
+            '/^\.\*$/m',
+            $dockerignore,
+            'Pola ".*" akan mengecualikan .htaccess'
+        );
+
+        // Blanket php akan mengenai index.php.
+        $this->assertDoesNotMatchRegularExpression(
+            '/^\*\.php$/m',
+            $dockerignore,
+            'Pola "*.php" akan mengecualikan public/index.php'
+        );
+
+        // "public" polos akan membuang SELURUH folder publik.
+        $this->assertDoesNotMatchRegularExpression(
+            '/^public$/m',
+            $dockerignore,
+            'Pola "public" akan mengecualikan seluruh folder public/'
+        );
+
+        // Sebaliknya, hasil build lokal tetap harus dikecualikan supaya
+        // tidak menimpa asset yang dibangun di dalam image.
+        $this->assertStringContainsString('public/build', $dockerignore);
+
+        // Berkas publik yang dibutuhkan halaman harus benar-benar ada.
+        foreach (['public/index.php', 'public/.htaccess'] as $berkas) {
+            $this->assertFileExists(
+                \base_path($berkas),
+                "{$berkas} wajib ada di repositori supaya bisa ter-copy ke image"
+            );
+        }
+    }
+
+    /**
+     * .htaccess harus dibaca Apache, kalau tidak pretty URL tidak jalan.
+     *
+     * docker-php.conf dari image php hanya memberi "AllowOverride All" untuk
+     * /var/www/, sedangkan blok <Directory> di vhost lebih spesifik dan
+     * menimpanya. Kalau nilainya None, .htaccess diabaikan sepenuhnya.
+     */
+    public function test_apache_membaca_htaccess(): void
+    {
+        $entrypoint = (string) file_get_contents(\base_path('docker/entrypoint.sh'));
+
+        $this->assertStringContainsString(
+            'AllowOverride[[:space:]]+)None',
+            $entrypoint,
+            'AllowOverride harus dinaikkan ke All agar .htaccess dibaca'
+        );
+
+        // Perilaku nyata dari aturan yang sama, diuji pada vhost bergaya Debian.
+        $vhost = <<<'APACHE'
+            <VirtualHost *:80>
+            	DocumentRoot /var/www/html
+
+            	<Directory /var/www/html>
+            		Options -Indexes +FollowSymLinks
+            		AllowOverride None
+            		Require all granted
+            	</Directory>
+            </VirtualHost>
+            APACHE;
+
+        // Vhost Debian memakai TAB untuk indentasi, dan sed di entrypoint tidak
+        // di-anchor ke awal baris. Pola di bawah meniru perilaku itu.
+        $docroot = preg_replace(
+            '/^([ \t]*DocumentRoot\s+)\/var\/www\/html([ \t]*)$/m',
+            '$1/var/www/html/public$2',
+            $vhost
+        );
+
+        $directory = preg_replace(
+            '/^([ \t]*<Directory\s+)\/var\/www\/html([ \t]*>)$/m',
+            '$1/var/www/html/public$2',
+            $docroot ?? ''
+        );
+
+        $fixed = preg_replace(
+            '/(AllowOverride\s+)None/',
+            '$1All',
+            $directory ?? ''
+        );
+
+        $this->assertStringContainsString('DocumentRoot /var/www/html/public', $fixed ?? '');
+        $this->assertStringContainsString('<Directory /var/www/html/public>', $fixed ?? '');
+        $this->assertStringContainsString('AllowOverride All', $fixed ?? '');
+        $this->assertStringNotContainsString('AllowOverride None', $fixed ?? '');
+
+        // Aturan harus idempoten: container bisa start berulang.
+        $again = preg_replace(
+            '/(AllowOverride\s+)None/',
+            '$1All',
+            preg_replace(
+                '/^([ \t]*<Directory\s+)\/var\/www\/html([ \t]*>)$/m',
+                '$1/var/www/html/public$2',
+                preg_replace(
+                    '/^([ \t]*DocumentRoot\s+)\/var\/www\/html([ \t]*)$/m',
+                    '$1/var/www/html/public$2',
+                    $fixed ?? ''
+                ) ?? ''
+            ) ?? ''
+        );
+
+        $this->assertSame($fixed, $again, 'Aturan Apache harus idempoten');
     }
 
     /**

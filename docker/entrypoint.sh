@@ -134,6 +134,28 @@ sed -ri "s#(<Directory[[:space:]]+)/var/www/html[[:space:]]*>#\1${DOCROOT}>#" \
     /etc/apache2/sites-available/*.conf
 
 # -----------------------------------------------------------------------------
+# .htaccess WAJIB dibaca, kalau tidak pretty URL Laravel tidak pernah jalan.
+#
+# Yang terjadi tanpa ini:
+#   - /var/www/html/public/pdf-to-markdown tidak ada sebagai berkas, dan
+#   - aturan rewrite di public/.htaccess TIDAK dijalankan karena
+#     AllowOverride None,
+#   sehingga Apache membalas 404, bukan 200.
+#
+# Kenapa harus dipaksa di sini:
+#   docker-php.conf dari image php memberi "AllowOverride All" hanya untuk
+#   /var/www/ (bukan /var/www/html/public/). Blok <Directory> di vhost lebih
+#   spesifik, jadi nilainya yang menang. Kalau vhost itu menulis
+#   "AllowOverride None", .htaccess jadi tidak terbaca sama sekali.
+#
+# Blok conf-enabled TIDAK bisa dipakai untuk menimpanya, karena
+# conf-enabled diproses LEBIH DAHULU daripada sites-enabled, jadi menimpa
+# di situ justru kalah oleh vhost.
+# -----------------------------------------------------------------------------
+sed -ri "s#(AllowOverride[[:space:]]+)None#\1All#" \
+    /etc/apache2/sites-available/*.conf
+
+# -----------------------------------------------------------------------------
 # 2. Folder yang ditulis aplikasi harus ada dan bisa ditulis www-data.
 #    Folder ini tidak ikut dari git karena isinya di-ignore.
 # -----------------------------------------------------------------------------

@@ -270,6 +270,32 @@ jobs:
           echo
           echo "::endgroup::"
 
+          # Apache rewrite: AH00124 (loop) hanya bisa dipahami kalau isi
+          # document root dan aturan rewrite-nya benar-benar terlihat.
+          in_container() {
+            if [ "${RUNNING}" = "true" ]; then
+              docker exec "${CONTAINER}" sh -c "$1" 2>&1
+            else
+              echo "Container berhenti, tidak bisa menjalankan: $1"
+            fi
+          }
+
+          echo "::group::ls -la /var/www/html/public"
+          in_container 'ls -la /var/www/html/public'
+          echo "::endgroup::"
+
+          echo "::group::Isi /var/www/html/public/.htaccess"
+          in_container 'test -f /var/www/html/public/.htaccess && cat /var/www/html/public/.htaccess || echo ".htaccess TIDAK ADA di document root"'
+          echo "::endgroup::"
+
+          echo "::group::DocumentRoot / AllowOverride / Directory"
+          in_container 'grep -rn "DocumentRoot\|AllowOverride\|<Directory" /etc/apache2/sites-enabled /etc/apache2/apache2.conf /etc/apache2/conf-enabled'
+          echo "::endgroup::"
+
+          echo "::group::mod_rewrite"
+          in_container 'apache2ctl -M 2>/dev/null | grep rewrite || echo "mod_rewrite TIDAK aktif"'
+          echo "::endgroup::"
+
           echo "::group::Port yang dipetakan"
           docker port "${CONTAINER}" || echo "Tidak ada port yang terpetakan"
           echo "::endgroup::"

@@ -133,6 +133,8 @@ RUN a2enconf app-logs
 WORKDIR /var/www/html
 
 # Asset hasil build tahap 1.
+# TUJUANYA /var/www/html/public/build, jadi harus menyebut "public" secara
+# eksplisit.
 COPY --from=assets /app/public/build ./public/build
 
 # Dependency PHP hasil tahap 2.
@@ -146,10 +148,21 @@ COPY app ./app
 COPY bootstrap ./bootstrap
 COPY config ./config
 COPY database ./database
-COPY public ./
 COPY resources ./resources
 COPY routes ./routes
 COPY storage ./storage
+
+# public/ HARUS masuk ke ./public, bukan ke ./.
+#
+# Docker menyalin ISI folder sumber, bukan foldernya sendiri. Sehingga
+# "COPY public ./" menaruh index.php dan .htaccess langsung di
+# /var/www/html/ dan TIDAK PERNAH di /var/www/html/public/.
+#
+# Akibatnya DocumentRoot yang diarahkan ke /var/www/html/public hanya berisi
+# folder build/, tanpa front controller dan tanpa aturan rewrite:
+#   - "COPY public ./"     -> /var/www/html/index.php   ( Salah tempat)
+#   - "COPY public ./public" -> /var/www/html/public/index.php ( BENAR)
+COPY public ./public
 
 # Folder storage/logs tidak ikut dari git (di-ignore), jadi dibuat di sini
 # supaya Monolog tidak gagal menulis log.
