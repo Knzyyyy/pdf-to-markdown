@@ -7,6 +7,10 @@ Ubah file PDF menjadi Markdown yang rapi — tanpa AI, tanpa API key, tanpa laya
 
 Dibangun dengan Laravel, Blade, dan satu library PHP ([`smalot/pdfparser`](https://github.com/smalot/pdfparser)) untuk ekstraksi teks.
 
+| Form upload | Hasil (Preview) | Hasil (Raw) |
+|---|---|---|
+| ![Form](docs/form.png) | ![Preview](docs/hasil-preview.png) | ![Raw](docs/hasil-raw.png) |
+
 ---
 
 ## Fitur
