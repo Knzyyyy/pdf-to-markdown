@@ -1198,6 +1198,123 @@ class TrustedProxyBehaviourTest extends TestCase
     }
 
     /**
+     * Runner harus dipin ke versi Ubuntu yang supporting Node 24.
+     *
+     * "ubuntu-latest" bisa bergeser ke rilis baru kapan saja dan mengubah
+     * perilaku tanpa ada perubahan di repository ini. Pinning membuat hasil
+     * CI bisa diulang.
+     */
+    public function test_runner_dipin_ke_ubuntu_24_04(): void
+    {
+        $workflow = (string) file_get_contents(\base_path('.github/workflows/tests.yml'));
+
+        $this->assertDoesNotMatchRegularExpression(
+            '/ubuntu-latest/',
+            $workflow,
+            'ubuntu-latest bisa bergeser sendiri, harus dipin'
+        );
+
+        // Setiap job harus punya runner, dan semuanya harus 24.04.
+        $this->assertSame(
+            2,
+            preg_match_all('/^    runs-on: (.+)$/m', $workflow, $m),
+            'Harus ada tepat dua job di workflow ini'
+        );
+
+        foreach ($m[1] as $runner) {
+            $this->assertSame(
+                'ubuntu-24.04',
+                trim($runner),
+                "Runner '{$runner}' harus ubuntu-24.04"
+            );
+        }
+    }
+
+    /**
+     * Semua action harus memakai build yang berjalan di Node 24.
+     *
+     * Versi lama memakai node20 dan akan berhenti berjalan saat runner
+     * Require hanya menyediakan Node 24. Ambang minimal di bawah diambil dari
+     * field "using" pada action.yml masing-masing tag.
+     */
+    public function test_actions_memakai_build_node_24(): void
+    {
+        $workflow = (string) file_get_contents(\base_path('.github/workflows/tests.yml'));
+
+        // Tag major -> versi pertama yang memakai node24.
+        $minimal = [
+            'actions/checkout' => 'v5',
+            'actions/setup-node' => 'v5',
+        ];
+
+        preg_match_all('#uses:\s+([\w-]+/[\w.-]+)@([\w.\-]+)#', $workflow, $m, PREG_SET_ORDER);
+
+        $this->assertNotEmpty($m, 'Tidak ada action yang terdeteksi');
+
+        $dilihat = [];
+
+        foreach ($m as $cocok) {
+            [, $action, $versi] = $cocok;
+
+            if (! array_key_exists($action, $minimal)) {
+                continue; // sudah dipin eksplisit, tidak perlu ambang major
+            }
+
+            $dilihat[$action] = $versi;
+
+            // CATATAN: version_compare() dengan operator mengembalikan BOOL, bukan int.
+            // Kalau hasilnya dipakai langsung sebagai angka, false akan
+            // dianggap 0 dan assertion selalu lulus. Karena itu harus
+            // dibungkus (int) lebih dulu.
+            $this->assertSame(
+                1,
+                (int) version_compare($versi, $minimal[$action], '>='),
+                "{$action}@{$versi} masih memakai node20, minimal {$minimal[$action]}"
+            );
+        }
+
+        // Kedua action wajib benar-benar dipakai, kalau tidak test ini
+        // akan hijau tanpa memeriksa apa pun.
+        foreach (array_keys($minimal) as $wajib) {
+            $this->assertArrayHasKey(
+                $wajib,
+                $dilihat,
+                "{$wajib} tidak ada di workflow, pemeriksaan versi jadi tidak berarti"
+            );
+        }
+
+        // setup-php tidak punya major baru, jadi harus dipin eksplisit ke
+        // versi yang sudah node24, bukan memakai tag bergerak "@v2".
+        $this->assertMatchesRegularExpression(
+            '/uses:\s+shivammathur\/setup-php@\d+\.\d+\.\d+/',
+            $workflow,
+            'setup-php harus dipin ke versi eksplisit agar node24 terjamin'
+        );
+        $this->assertDoesNotMatchRegularExpression(
+            '/uses:\s+shivammathur\/setup-php@v\d+/',
+            $workflow
+        );
+    }
+
+    /**
+     * Checkout v5.1+/v6.1+ mengetatkan aturan pull_request_target.
+     *
+     * Pengetatan itu TIDAK berlaku di sini karena workflow memakai trigger
+     * push dan pull_request biasa. Kalau nanti diganti ke pull_request_target,
+     * perubahan ini harus ditinjau ulang.
+     */
+    public function test_tidak_ada_pull_request_target_tanpa_tinjauan(): void
+    {
+        $workflow = (string) file_get_contents(\base_path('.github/workflows/tests.yml'));
+
+        $this->assertDoesNotMatchRegularExpression(
+            '/pull_request_target/',
+            $workflow,
+            'pull_request_target memberi akses secret ke kode PR; jangan dipakai tanpa tinjauan'
+        );
+    }
+
+    /**
      * Ambil script run milik langkah "Diagnosis kegagalan container".
      *
      * Mengambil per langkah, bukan seluruh workflow, supaya assertion tidak

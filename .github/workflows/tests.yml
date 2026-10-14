@@ -17,7 +17,7 @@ concurrency:
 jobs:
   tests:
     name: PHP ${{ matrix.php }} / Composer ${{ matrix.composer }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     strategy:
@@ -34,10 +34,13 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup PHP
-        uses: shivammathur/setup-php@v2
+        # Major tetap v2, jadi tag "@v2" saja tidak cukup jelas.
+        # Runtime node24 baru ikut di build 2.40.0, jadi versinya dipin
+        # eksplisit supaya node24 tidak bergantung pada isi tag bergerak.
+        uses: shivammathur/setup-php@2.40.0
         with:
           php-version: ${{ matrix.php }}
           # ext-zip WAJIB: fiturnya ada di require composer.json, jadi
@@ -60,7 +63,7 @@ jobs:
           php artisan key:generate --force
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '20'
           cache: npm
@@ -101,12 +104,12 @@ jobs:
   docker:
     name: Docker build dan smoke test
     needs: tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Tampilkan versi Docker
         run: docker version
